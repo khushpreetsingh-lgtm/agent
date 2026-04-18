@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+mcpenv/
+
+# Secrets / local config
+*.json
+!mcp_config.yaml
+client_secret.json
+token.json
+credentials.json
+.env.local
+
+# Agent data and logs
+data/
+logs/
+output/
+dist/
+
+# Testing / Tooling
+.pytest_cache/
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+*.log
+
+# Windows specific
+Desktop.ini
+Thumbs.db

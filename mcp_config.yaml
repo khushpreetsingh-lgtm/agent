@@ -1,0 +1,36 @@
+servers:
+  - name: brave-search
+    enabled: false
+    transport: stdio
+    config:
+      command: conda
+      args:
+        - "run"
+        - "-n"
+        - "mcpenv"
+        - "uvx"
+        - "mcp-server-brave-search"
+      env:
+        BRAVE_API_KEY: ${BRAVE_API_KEY}
+
+  - name: jira
+    enabled: true
+    transport: stdio
+    config:
+      command: mcp-atlassian
+      args: []
+      env:
+        JIRA_URL: ${JIRA_URL}
+        JIRA_USERNAME: ${JIRA_USERNAME}
+        JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+
+  - name: google-workspace
+    enabled: true
+    transport: stdio
+    config:
+      command: workspace-mcp
+      args: []
+      env:
+        GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+        GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+        USER_GOOGLE_EMAIL: ${USER_GOOGLE_EMAIL}

@@ -1,0 +1,271 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Workflow: Opportunity → Quote
+#
+# NetSuite (extract opportunity + address)
+#   → CPQ (create quote, fill product, price, finalize)
+#   → Email (draft, human review, send)
+#
+# Human gates: data review, contact review, approver decision, email review
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: opportunity_to_quote
+description: >
+  Extract opportunity details from NetSuite, create and fill a quote in CPQ,
+  get human approvals at key gates, then send the quote email to the customer.
+
+inputs:
+  opportunity_id:
+    type: string
+    required: true
+    description: "NetSuite Opportunity ID — e.g. OP-20080 or just 20080"
+
+
+steps:
+
+  # ════════════════════════════════════════════════════════
+  # PHASE 1 — NetSuite: log in and extract opportunity data
+  # ════════════════════════════════════════════════════════
+
+  - id: netsuite_login
+    tool: browser_login
+    description: "Log in to NetSuite (handles role selection automatically)"
+    params:
+      site: netsuite
+
+  - id: netsuite_open_opportunity
+    tool: browser_act
+    description: "Search for the opportunity and open its record"
+    params:
+      instruction: >
+        Search for opportunity '{{ opportunity_id }}' in NetSuite.
+        Steps:
+        1. Click the global search bar at the top of the page (magnifying glass icon or search input).
+        2. Type '{{ opportunity_id }}' and press Enter or click the search button.
+        3. In the search results, look for a row where the Type is "Opportunity".
+        4. Click the View link or the opportunity name to open the record.
+        5. Wait for the opportunity detail page to fully load.
+        If the global search is not visible, try navigating via the top menu:
+        Transactions → CRM → Opportunities → search for '{{ opportunity_id }}'.
+
+  - id: netsuite_extract_opportunity
+    tool: browser_extract
+    description: "Extract all opportunity fields from the open record"
+    params:
+      instruction: >
+        You are on a NetSuite Opportunity detail page.
+        Extract every visible field and its value from the page.
+      # schema intentionally omitted — agent reads the page and extracts what it finds
+    outputs:
+      - opportunity
+
+  - id: netsuite_search_structure
+    tool: browser_act
+    description: "Search for the service address Structure record in NetSuite"
+    params:
+      instruction: >
+        Search for the service address structure in NetSuite.
+        1. Click the global search bar.
+        2. Type '{{ opportunity.address }}' and press Enter.
+        3. In the results, find a row with Type = "Structure" or "Location".
+        4. Click View to open the Structure record.
+        If no Structure record is found, search for just the city or street name.
+
+  - id: netsuite_extract_structure
+    tool: browser_extract
+    description: "Extract the full service address from the Structure record"
+    params:
+      instruction: >
+        Extract the complete postal address from this Structure record.
+        Look for: country, state/province, city, full street address, postcode/ZIP code.
+      # schema intentionally omitted — agent reads the page and extracts what it finds
+    outputs:
+      - structure
+
+
+  # ════════════════════════════════════════════════════════
+  # HUMAN GATE 1 — verify extracted data before creating quote
+  # ════════════════════════════════════════════════════════
+
+  - id: review_extracted_data
+    tool: human_review
+    description: "Human verifies extracted opportunity and address data"
+    params:
+      review_type: info_review
+      summary_fields:
+        - opportunity
+        - structure
+
+
+  # ════════════════════════════════════════════════════════
+  # PHASE 2 — CPQ: create the quote
+  # ════════════════════════════════════════════════════════
+
+  - id: cpq_login
+    tool: browser_login
+    description: "Log in to CPQ"
+    params:
+      site: cpq
+
+  - id: cpq_navigate_quotes
+    tool: browser_act
+    description: "Navigate to the Quotes section in CPQ"
+    params:
+      instruction: >
+        Navigate to the Quotes section in CPQ.
+        Look for a "Quotes" link in the top navigation or sidebar menu and click it.
+        Wait for the Quotes list page to load.
+
+  - id: cpq_create_new_quote
+    tool: browser_act
+    description: "Click the button to create a new quote"
+    params:
+      instruction: >
+        On the CPQ Quotes page, click the button to create a new quote.
+        The button may be labeled: "New Quote", "Create Quote", "+ Create", "Add Quote", or similar.
+        Wait for the quote creation wizard or form to open.
+
+  - id: cpq_fill_customer
+    tool: browser_act
+    description: "Fill customer and opportunity fields in the quote wizard"
+    params:
+      instruction: >
+        Fill in the customer and opportunity information:
+        - Customer / Account: search for and select '{{ opportunity.buyer }}'
+        - Opportunity: '{{ opportunity.opportunity_id }}'
+        If there is a "Next" button after filling these fields, click it to advance.
+        Wait for the next step to load.
+
+  - id: cpq_fill_product
+    tool: browser_act
+    description: "Fill the product configuration: address, bandwidth, term, IP"
+    params:
+      instruction: >
+        Fill in the product / service configuration:
+        - Service Address: '{{ structure.street }}, {{ structure.city }}, {{ structure.state }} {{ structure.postcode }}'
+        - Bandwidth: '{{ opportunity.bandwidth_amount }}' '{{ opportunity.bandwidth_unit }}'
+        - Contract Term: '{{ opportunity.term_amount }}' '{{ opportunity.term_unit }}'
+        - IP Address Assignment: '{{ opportunity.ip_address_assignment }}'
+        - Gateway: '{{ opportunity.gateway }}'
+        - BGP: '{{ opportunity.bgp }}'
+        - Additional Port: '{{ opportunity.additional_port }}'
+        - Burst: '{{ opportunity.burst }}'
+        Use dropdowns where provided. Fill all visible required fields.
+
+  - id: cpq_locate_on_map
+    tool: browser_click
+    description: "Click 'Locate on Map' to geocode the service address"
+    params:
+      target: "Locate on Map button or Locate Me button or Map It button"
+
+  - id: cpq_advance_to_pricing
+    tool: browser_act
+    description: "Click Next to advance to the pricing/review step"
+    params:
+      instruction: >
+        Click the "Next" button to advance to the pricing or review step.
+        Wait for the pricing information to load.
+        If you see a "Calculate Price" or "Get Price" button, click it and wait.
+
+
+  # ════════════════════════════════════════════════════════
+  # PHASE 3 — CPQ: extract price and add to quote
+  # ════════════════════════════════════════════════════════
+
+  - id: cpq_extract_price
+    tool: browser_extract
+    description: "Extract the MRR price shown on the pricing step"
+    params:
+      instruction: >
+        Extract the pricing information from the current CPQ step.
+        Look for: Monthly Recurring Revenue (MRR), NRC (Non-Recurring Charge),
+        total price, unit price, or any price displayed.
+      # schema intentionally omitted — agent reads the page and extracts what it finds
+    outputs:
+      - pricing
+
+  - id: cpq_add_to_quote
+    tool: browser_act
+    description: "Click 'Add to Quote' and advance to the Quote Summary"
+    params:
+      instruction: >
+        Click the "Add to Quote" button (or "Add Product", "Add Line", similar).
+        Then click "Next" to reach the Quote Summary page.
+        Wait for the summary to load.
+
+
+  # ════════════════════════════════════════════════════════
+  # HUMAN GATE 2 — verify contact info
+  # ════════════════════════════════════════════════════════
+
+  - id: review_contact
+    tool: human_review
+    description: "Human reviews contact information for the quote"
+    params:
+      review_type: contact_review
+      summary_fields:
+        - opportunity
+
+  - id: review_approvers
+    tool: human_review
+    description: "Human decides whether approvers are needed"
+    params:
+      review_type: approver_review
+
+
+  # ════════════════════════════════════════════════════════
+  # PHASE 4 — CPQ: finalize the quote
+  # ════════════════════════════════════════════════════════
+
+  - id: cpq_finalize
+    tool: browser_act
+    description: "Finalize the quote in CPQ"
+    params:
+      instruction: >
+        Click the "Finalize" button (may also be labeled "Submit", "Confirm", "Complete Quote").
+        Wait for the finalization to complete and the quote ID to be shown.
+
+  - id: cpq_extract_quote_id
+    tool: browser_extract
+    description: "Extract the finalized quote ID and final price"
+    params:
+      instruction: >
+        Extract the finalized quote details from the current page.
+        Look for: quote ID (usually starts with QUT-, Q-, or is a number),
+        MRR price, NRC, and any reference number shown.
+      # schema intentionally omitted — agent reads the page and extracts what it finds
+    outputs:
+      - quote
+
+
+  # ════════════════════════════════════════════════════════
+  # PHASE 5 — Email: draft, review, send
+  # ════════════════════════════════════════════════════════
+
+  - id: draft_email
+    tool: compose_email
+    description: "Draft the quote approval email"
+    params:
+      template: quote_email
+      data_from:
+        - opportunity
+        - quote
+        - structure
+        - pricing
+    outputs:
+      - email
+
+  - id: review_email
+    tool: human_review
+    description: "Human reviews and approves the email before sending"
+    params:
+      review_type: email_review
+      summary_fields:
+        - email
+
+  - id: send_quote_email
+    tool: send_email
+    description: "Send the approved quote email to the customer"
+    params:
+      data_from:
+        - email
+    condition: "email.approved == true"
