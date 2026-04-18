@@ -1,0 +1,42 @@
+# --- Orchestration ---
+langgraph
+langchain
+langchain-openai
+langchain-anthropic
+
+# --- Browser Automation ---
+playwright
+anthropic
+openai
+
+# --- Data & Config ---
+pydantic
+pydantic-settings
+python-dotenv
+
+# --- API ---
+fastapi
+uvicorn
+websockets
+
+# --- Config Files ---
+pyyaml
+
+# --- Logging ---
+structlog
+
+# --- Durable Checkpointing ---
+langgraph-checkpoint-sqlite
+aiosqlite
+
+# --- WebRTC Streaming ---
+aiortc
+av
+
+# --- MCP (optional) ---
+langchain-mcp-adapters
+
+# --- Dev / Testing ---
+pytest
+pytest-asyncio
+ruff

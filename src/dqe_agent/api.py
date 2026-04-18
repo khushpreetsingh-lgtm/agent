@@ -371,6 +371,10 @@ async def _handle_message(ws: WebSocket, session_id: str, message: str) -> None:
     try:
         task_store.update_task(task_id, status="running")
 
+        # ── Signal 'planning' immediately so the frontend shows activity ──
+        await _send(ws, {"type": "status", "status": "planning", "message": "Planning your request..."})
+        task_store.log(task_id, "Planning started", step="planner", level="info")
+
         while True:
             interrupted = False
             if session_bm:
@@ -432,6 +436,23 @@ async def _handle_message(ws: WebSocket, session_id: str, message: str) -> None:
                     msgs = node_output.get("messages", [])
                     plan = node_output.get("plan")
 
+                    # Emit human-readable phase events for each node
+                    if node_name == "planner":
+                        pass  # planning status already sent before the loop
+                    elif node_name == "executor":
+                        step_desc = ""
+                        if plan := node_output.get("plan"):
+                            idx = node_output.get("current_step_index", 0)
+                            if 0 <= idx < len(plan):
+                                step_desc = plan[idx].get("description", "") or plan[idx].get("tool", "")
+                        if not step_desc and node_output.get("step_results"):
+                            last_sr = node_output["step_results"][-1]
+                            step_desc = last_sr.get("step_id", "") or last_sr.get("tool", "")
+                        await _send(ws, {"type": "status", "status": "executing",
+                                        "message": f"Executing: {step_desc}" if step_desc else "Executing..."})
+                    elif node_name == "verifier":
+                        await _send(ws, {"type": "status", "status": "verifying", "message": "Verifying result..."})
+
                     # Send plan info
                     if plan and node_name == "planner":
                         await _send(ws, {
@@ -448,20 +469,33 @@ async def _handle_message(ws: WebSocket, session_id: str, message: str) -> None:
                                 task_store.update_task(task_id, task_type=_infer_task_type(first_tool))
                                 task_type_set = True
 
-                    # Send step status
+                    # Send step status — with human-readable label
                     step_results = node_output.get("step_results", [])
+                    # Build a quick id→description map from the plan for labelling
+                    _plan_map = {s.get("id", ""): s for s in (node_output.get("plan") or [])}
                     for sr in step_results:
                         if isinstance(sr, dict):
                             steps_completed += 1
+                            step_id = sr.get("step_id", "")
+                            tool = sr.get("tool", "")
+                            step_meta = _plan_map.get(step_id, {})
+                            label = (
+                                step_meta.get("description")
+                                or step_meta.get("tool")
+                                or tool
+                                or step_id
+                            )
+                            status = sr.get("status", "")
                             await _send(ws, {
                                 "type": "step_status",
-                                "step": sr.get("step_id", ""),
-                                "tool": sr.get("tool", ""),
-                                "status": sr.get("status", ""),
+                                "step": step_id,
+                                "tool": tool,
+                                "label": label,
+                                "status": status,
                                 "result": str(sr.get("result", ""))[:200],
                             })
                             # If this was a successful extraction, send full data to frontend
-                            if sr.get("tool") == "browser_extract" and sr.get("status") == "success":
+                            if sr.get("tool") == "browser_extract" and status == "success":
                                 raw = sr.get("result", "")
                                 try:
                                     import json as _json
@@ -469,19 +503,21 @@ async def _handle_message(ws: WebSocket, session_id: str, message: str) -> None:
                                     if isinstance(extracted, dict):
                                         await _send(ws, {
                                             "type": "extraction_result",
-                                            "step": sr.get("step_id", ""),
+                                            "step": step_id,
                                             "data": extracted,
                                         })
                                 except Exception:
                                     pass
                             # Store structured tool call data for the detail endpoint
+                            log_msg = f"[{label}] {status}" if label != tool else f"[{tool}] {status}"
                             task_store.log(
                                 task_id,
-                                f"[{sr.get('tool', '')}] {sr.get('status', '')}",
-                                step=sr.get("step_id", ""),
-                                level="info" if sr.get("status") == "success" else "warning",
+                                log_msg,
+                                step=step_id,
+                                level="info" if status == "success" else "warning",
                                 data={
-                                    "tool":        sr.get("tool", ""),
+                                    "tool":        tool,
+                                    "label":       label,
                                     "result":      str(sr.get("result", ""))[:500],
                                     "duration_ms": sr.get("duration_ms"),
                                     "retries":     sr.get("retries", 0),
@@ -505,7 +541,9 @@ async def _handle_message(ws: WebSocket, session_id: str, message: str) -> None:
             status="complete",
             result_summary=last_summary or None,
         )
+        await _send(ws, {"type": "status", "status": "completed", "message": "Done"})
         await _send(ws, {"type": "agent_done", "content": ""})
+
 
     except asyncio.TimeoutError:
         _awaiting_input.discard(session_id)
