@@ -20,7 +20,12 @@ from dqe_agent.state import AgentState
 logger = logging.getLogger(__name__)
 
 # ── Keywords that signal Jira involvement ────────────────────────────────────
-_JIRA_KEYWORDS = {"jira", "ticket", "issue", "sprint", "board", "epic", "story", "backlog"}
+_JIRA_KEYWORDS = {
+    "jira", "ticket", "issue", "sprint", "board", "epic", "story", "backlog",
+    # also trigger for common creation verbs when Jira context is implied
+    "task", "bug", "subtask", "create ticket", "create issue", "create task",
+    "create sprint", "create story", "create epic",
+}
 
 # ── In-memory cache for common data (Jira projects, sprints, etc.) ────────────
 _CACHE: dict[str, tuple[float, Any]] = {}   # key -> (fetch_time, data)
@@ -68,7 +73,16 @@ async def _prefetch_selection_options(task: str, context_parts: list) -> None:
     task_lower = task.lower()
 
     # ── Jira: fetch projects if task is Jira-related ─────────────────────────
-    if any(kw in task_lower for kw in _JIRA_KEYWORDS):
+    # Strong keywords → always trigger Jira prefetch
+    _JIRA_STRONG = {"jira", "ticket", "sprint", "board", "epic", "backlog",
+                    "create ticket", "create issue", "create sprint",
+                    "create story", "create epic", "jira issue"}
+    # Weak keywords → trigger only if a strong keyword is also present
+    _JIRA_WEAK = {"issue", "task", "bug", "subtask", "story"}
+
+    _has_strong = any(kw in task_lower for kw in _JIRA_STRONG)
+    _has_weak   = any(kw in task_lower for kw in _JIRA_WEAK)
+    if _has_strong or (_has_weak and _has_strong):
         await _prefetch_jira_projects(context_parts)
 
     # NOTE: Boards are NOT pre-fetched globally because jira_get_agile_boards
@@ -343,6 +357,16 @@ ALWAYS follow this pattern — no exceptions:
 
 NEVER use ask_user for system-defined values. NEVER hard-code options you haven't fetched.
 NEVER ask the user to type a key, ID, or code that the system can provide as a list.
+
+⛔ NEVER ASSUME any Jira field. This means:
+  • NEVER assume the project — ALWAYS fetch and present with request_selection.
+  • NEVER assume the sprint — ALWAYS fetch boards then sprints, present with request_selection.
+  • NEVER assume the assignee — ALWAYS fetch project members and present with request_selection
+    (or ask_user to confirm if no listing tool is available).
+  • NEVER assume the issue type — if not 100% explicit in user message, fetch and ask.
+  • NEVER assume the board — ALWAYS fetch boards for the selected project.
+  Even if the user says "create a task", you MUST still fetch and confirm the project
+  before creating anything. Assume nothing.
 
 ═══════════════════════════════════════════════════════════════════
 JIRA / ATLASSIAN
