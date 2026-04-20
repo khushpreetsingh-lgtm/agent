@@ -897,8 +897,13 @@ Ask for any of these if not given. user_google_email is auto-injected.
 
 ── SEARCH EMAILS (search_gmail_messages) ──
 Params: query (Gmail search syntax e.g. "from:boss@co.com", "subject:invoice", "is:unread")
-Returns PLAIN TEXT with message IDs — use {{step_id}} in direct_response.
+Returns PLAIN TEXT with message IDs and snippets.
   {"id":"search","tool":"search_gmail_messages","params":{"query":"is:unread"}}
+
+── COUNT / SUMMARIZE EMAILS ──
+If the user asks "how many unread emails" or wants a summary of them, execute the search and then summarize the result using direct_response.
+  [{"id":"search","tool":"search_gmail_messages","params":{"query":"is:unread"}},
+   {"id":"show","tool":"direct_response","params":{"message":"Here is a summary of your unread emails:\n{{search}}"}}]
 
 ── READ EMAIL (get_gmail_message_content) ──
 Params: message_id (from search result)
@@ -1628,8 +1633,7 @@ _FAST_GMAIL_READ: list[tuple] = [
     (
         _re_fast.compile(
             r'\b(show|check|list|any|get|fetch|display)\b.{0,20}\bunread\b.{0,20}\b(emails?|messages?|mail)?\b'
-            r'|\bany\s+(new|unread)\s*(emails?|messages?|mail)?\b'
-            r'|\bunread\b',
+            r'|\bany\s+(new|unread)\s*(emails?|messages?|mail)?\b',
             _re_fast.IGNORECASE,
         ),
         "is:unread in:inbox",
@@ -1681,15 +1685,6 @@ _FAST_GMAIL_READ: list[tuple] = [
         ),
         "has:attachment in:inbox",
         "Emails with attachments",
-    ),
-    # "how many unread emails do I have"
-    (
-        _re_fast.compile(
-            r'\b(how many|count)\b.{0,20}\bunread\b.{0,20}\b(emails?|messages?|mail)?\b',
-            _re_fast.IGNORECASE,
-        ),
-        "is:unread in:inbox",
-        "Unread email count",
     ),
     # "show emails from today" / "show emails I sent today"
     (

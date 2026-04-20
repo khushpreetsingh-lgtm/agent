@@ -357,6 +357,18 @@ async def executor_node(state: AgentState) -> dict:
                         response_msg = f"{prefix}:\n\n{formatted}"
                     else:
                         response_msg = formatted
+            
+            # --- Cleanup Gmail Search Output ---
+            if "Found " in response_msg and "📧 MESSAGES:" in response_msg and "Message ID:" in response_msg:
+                import re
+                # Extract just the count part: "Found X messages matching 'query':"
+                header_match = re.search(r"(Found \d+ messages matching '[^']+':)", response_msg)
+                if header_match:
+                    count_header = header_match.group(1)
+                    # If it's a "how many" intent (no specific message asked for), just show the count.
+                    # Or we can just strip out the ugly URLs and Thread IDs.
+                    response_msg = response_msg[:response_msg.find("📧 MESSAGES:")].strip()
+                    response_msg += f"\n(Run 'read my unread emails' if you want to interact with them)"
         else:
             response_msg = raw_msg
 
