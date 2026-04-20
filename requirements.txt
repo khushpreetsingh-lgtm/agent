@@ -40,3 +40,5 @@ langchain-mcp-adapters
 pytest
 pytest-asyncio
 ruff
+mcp-atlassian
+workspace-mcp

@@ -39,6 +39,249 @@ def _unwrap_mcp_result(raw: Any) -> Any:
     return raw
 
 
+def _step_message(idx: int, total: int, tool: str, status: str, error: str, params: dict, result: Any) -> str:
+    """Return a human-readable progress message for a single step."""
+    prefix = f"Step {idx + 1}/{total}"
+
+    if status == "failed":
+        return f"{prefix} [{tool}] failed — {error[:250]}"
+
+    if tool == "request_selection":
+        q = params.get("question", "")
+        try:
+            selected = json.loads(result).get("selected", result) if isinstance(result, str) else result
+        except Exception:
+            selected = result or ""
+        return f"{prefix} Selected: {selected}" + (f" (for: {q})" if q else "")
+
+    if tool == "ask_user":
+        q = params.get("question", "")
+        try:
+            answer = json.loads(result).get("answer", result) if isinstance(result, str) else result
+        except Exception:
+            answer = result or ""
+        return f"{prefix} {q}: {answer}"
+
+    # For MCP/API tool calls show a brief version of the result
+    brief = ""
+    if result:
+        try:
+            parsed = json.loads(result) if isinstance(result, str) else result
+            if isinstance(parsed, dict):
+                # Show a few key fields — id, name, key, summary, etc.
+                for key in ("id", "name", "key", "summary", "sprint", "sprintId", "self"):
+                    if key in parsed:
+                        brief = f" → {key}: {parsed[key]}"
+                        break
+                if not brief:
+                    first_val = next(iter(parsed.values()), "")
+                    brief = f" → {str(first_val)[:80]}"
+            elif isinstance(parsed, list):
+                brief = f" → {len(parsed)} item(s) returned"
+        except Exception:
+            brief = f" → {str(result)[:80]}"
+
+    label = tool.replace("jira_", "").replace("_", " ").title()
+    return f"{prefix} {label}: {status}{brief}"
+
+
+def _no_results_sentence(prefix: str) -> str:
+    """Turn a prefix like 'Here are your open tasks' into a clean empty-state sentence."""
+    p = prefix.lower().strip()
+    # Strip common filler openers so we can inspect the subject
+    for filler in ("here are your ", "here are the ", "your ", "the "):
+        if p.startswith(filler):
+            p = p[len(filler):]
+            break
+    # Map common subjects to a natural sentence.
+    # ORDER MATTERS — more specific entries must come before generic ones.
+    _MAP = [
+        ("blocker",        "No blockers right now — all clear!"),
+        ("critical",       "No critical issues found."),
+        ("high priority",  "No high priority issues found."),
+        ("medium priority","No medium priority issues found."),
+        ("low priority",   "No low priority issues found."),
+        ("unassigned",     "No unassigned issues found in the sprint."),
+        ("in progress",    "Nothing is currently in progress."),
+        ("in review",      "Nothing is currently in review."),
+        ("to do",          "No items in To Do right now."),
+        ("testing",        "No issues are in testing right now."),
+        ("backlog",        "The backlog is empty."),
+        ("done",           "No issues marked as Done yet."),
+        ("open tasks",     "You don't have any open tasks right now."),
+        ("open issues",    "You don't have any open issues right now."),
+        ("open tickets",   "You don't have any open tickets right now."),
+        ("tasks",          "You don't have any tasks right now."),
+        ("issues",         "You don't have any issues right now."),
+        ("tickets",        "You don't have any tickets right now."),
+    ]
+    for key, sentence in _MAP:
+        if key in p:
+            return sentence
+    # Fallback: build a generic sentence from the prefix
+    subject = prefix.strip().rstrip(":").strip() if prefix else "issues"
+    return f"No {subject.lower()} found."
+
+
+def _format_result_for_display(raw: str) -> str:
+    """Convert a raw MCP result string into a human-readable message.
+
+    Handles:
+    - Jira search results → friendly issue list or "no results" message
+    - Generic JSON → pretty-printed
+    - Plain text → returned as-is
+    """
+    if not raw or not isinstance(raw, str):
+        return raw or ""
+
+    stripped = raw.strip()
+    if not (stripped.startswith("{") or stripped.startswith("[")):
+        return raw  # plain text — no transformation needed
+
+    try:
+        data = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError):
+        return raw
+
+    # ── Jira search result: {"total": N, "issues": [...]} ───────────────────
+    if isinstance(data, dict) and "issues" in data:
+        issues = data.get("issues", [])
+        total = data.get("total", len(issues))
+
+        if not issues:
+            return "No issues found."
+
+        def _str_field(obj: Any, *keys: str) -> str:
+            for k in keys:
+                v = obj.get(k)
+                if isinstance(v, dict):
+                    v = v.get("name") or v.get("displayName") or ""
+                if v and isinstance(v, str):
+                    return v
+            return ""
+
+        blocks: list[str] = []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            key     = issue.get("key", "")
+            fields  = issue.get("fields", issue)
+            summary  = _str_field(fields, "summary") or _str_field(issue, "summary") or "(no summary)"
+            status   = _str_field(fields, "status")  or _str_field(issue, "status")
+            priority = _str_field(fields, "priority") or _str_field(issue, "priority")
+            assignee = _str_field(fields, "assignee") or _str_field(issue, "assignee") or "Unassigned"
+            issue_type = _str_field(fields, "issuetype") or _str_field(issue, "issuetype")
+
+            # Line 1: key + summary
+            title = f"**{key}** — {summary}" if key else f"**{summary}**"
+            # Line 2: meta details
+            meta_parts = []
+            if status:
+                meta_parts.append(f"Status: {status}")
+            if priority:
+                meta_parts.append(f"Priority: {priority}")
+            if issue_type:
+                meta_parts.append(f"Type: {issue_type}")
+            meta_parts.append(f"Assignee: {assignee}")
+            meta_line = "   " + "   |   ".join(meta_parts)
+
+            blocks.append(f"{title}\n{meta_line}")
+
+        count = len(issues) if total < 0 else total
+        header = f"**{count} issue{'s' if count != 1 else ''} found:**\n\n"
+        return header + "\n\n".join(blocks)
+
+    # ── Generic JSON: pretty-print ───────────────────────────────────────────
+    return json.dumps(data, indent=2)
+
+
+def _build_completion_summary(step_results: list) -> str:
+    """Build a rich human-readable summary of what was accomplished."""
+    _INTERACTION_TOOLS = {"request_selection", "ask_user", "human_review_request", "direct_response"}
+
+    # Collect user inputs and selections
+    selections: dict[str, str] = {}
+    for r in step_results:
+        if not isinstance(r, dict):
+            continue
+        tool = r.get("tool", "")
+        step_id = r.get("step_id", "")
+        raw = r.get("result", "")
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, dict):
+                if "answer" in parsed:
+                    selections[step_id] = str(parsed["answer"])
+                elif "selected" in parsed:
+                    selections[step_id] = str(parsed["selected"])
+        except Exception:
+            if tool in ("ask_user", "request_selection"):
+                selections[step_id] = str(raw)[:120]
+
+    # Find the last successful non-interaction tool result (the "create/update" result)
+    primary_result: dict = {}
+    primary_tool: str = ""
+    for r in reversed(step_results):
+        if not isinstance(r, dict):
+            continue
+        if r.get("tool") in _INTERACTION_TOOLS:
+            continue
+        if r.get("status") != "success":
+            continue
+        raw = r.get("result", "")
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, dict):
+                primary_result = parsed
+                primary_tool = r.get("tool", "")
+                break
+        except Exception:
+            pass
+
+    lines: list[str] = []
+
+    # Title line based on the primary tool
+    if primary_tool:
+        label = primary_tool.replace("jira_", "").replace("_", " ").title()
+        lines.append(f"**{label} completed successfully.**")
+    else:
+        lines.append("**Task completed successfully.**")
+
+    # Key fields from the primary result
+    KEY_FIELDS = [
+        ("id", "ID"), ("key", "Key"), ("name", "Name"), ("summary", "Summary"),
+        ("sprintId", "Sprint ID"), ("boardId", "Board ID"), ("startDate", "Start Date"),
+        ("endDate", "End Date"), ("state", "State"), ("goal", "Goal"),
+        ("self", None),  # skip "self" (URL noise)
+    ]
+    shown: set[str] = set()
+    for field, label in KEY_FIELDS:
+        if label is None:
+            continue
+        if field in primary_result:
+            lines.append(f"  {label}: {primary_result[field]}")
+            shown.add(field)
+
+    # Remaining primary result fields (limit noise)
+    extras = [(k, v) for k, v in primary_result.items() if k not in shown and k not in ("self", "links", "_links")]
+    for k, v in extras[:6]:
+        if isinstance(v, (dict, list)):
+            continue
+        lines.append(f"  {k}: {v}")
+
+    # User selections / answers (project, board, sprint name, etc.)
+    if selections:
+        lines.append("")
+        lines.append("**Inputs used:**")
+        for step_id, val in selections.items():
+            label = step_id.replace("_", " ").title()
+            lines.append(f"  {label}: {val}")
+
+    return "\n".join(lines)
+
+
 async def executor_node(state: AgentState) -> dict:
     """Execute the current step in the plan."""
     from dqe_agent.tools import get_tool
@@ -49,7 +292,8 @@ async def executor_node(state: AgentState) -> dict:
     cost = state.get("estimated_cost", 0.0)
 
     if idx >= len(plan):
-        return {"status": "complete", "messages": [AIMessage(content="All steps completed.")]}
+        summary = _build_completion_summary(state.get("step_results", []))
+        return {"status": "complete", "messages": [AIMessage(content=summary)]}
 
     step = plan[idx]
     step_id = step.get("id", f"step_{idx}")
@@ -57,7 +301,7 @@ async def executor_node(state: AgentState) -> dict:
     params = step.get("params", {})
     description = step.get("description", "")
 
-    logger.info("[EXECUTOR] Step %d/%d: [%s] %s", idx + 1, len(plan), tool_name, description)
+    logger.info("[EXECUTOR] Step %d/%d: [%s] %s", idx + 1, len(plan), tool_name, description or "(no description)")
 
     # Ensure flow_data is available early — some direct_response paths
     # (replanning after MCP failures) inspect flow_data for user corrections.
@@ -95,18 +339,29 @@ async def executor_node(state: AgentState) -> dict:
         results_by_id = {r.get("step_id", ""): r for r in step_results if isinstance(r, dict)}
         if "{{" in raw_msg:
             response_msg = _resolve_template(raw_msg, flow_data, results_by_id)
-            # If the template resolved to raw JSON, pretty-print it for the user
+            # Format any embedded JSON result into a human-readable string
             if response_msg and response_msg.strip().startswith(("[", "{")):
-                try:
-                    parsed = json.loads(response_msg)
-                    response_msg = json.dumps(parsed, indent=2)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                response_msg = _format_result_for_display(response_msg)
+            elif response_msg:
+                # Message may embed a JSON blob mid-text — format any trailing JSON block
+                # e.g. "Your open tasks are: {...}"
+                import re as _re_inline
+                _m = _re_inline.search(r'(\{[\s\S]*\}|\[[\s\S]*\])\s*$', response_msg)
+                if _m:
+                    prefix = response_msg[:_m.start()].rstrip().rstrip(":").rstrip()
+                    formatted = _format_result_for_display(_m.group(1))
+                    if formatted == "No issues found.":
+                        # Merge prefix + empty result into one natural sentence
+                        response_msg = _no_results_sentence(prefix)
+                    elif prefix:
+                        response_msg = f"{prefix}:\n\n{formatted}"
+                    else:
+                        response_msg = formatted
         else:
             response_msg = raw_msg
 
         return {
-            "step_results": [{
+            "step_results": state.get("step_results", []) + [{
                 "step_id": step_id, "step_index": idx, "tool": "direct_response",
                 "status": "success", "result": response_msg, "error": "",
                 "duration_ms": 0, "retries": 0,
@@ -224,7 +479,7 @@ async def executor_node(state: AgentState) -> dict:
                 logger.info("[EXECUTOR] Human review rejected at step %s — stopping workflow", step_id)
                 return {
                     "status": "complete",
-                    "step_results": [{
+                    "step_results": state.get("step_results", []) + [{
                         "step_id": step_id, "step_index": idx, "tool": tool_name,
                         "status": "rejected", "result": "User rejected — workflow stopped",
                         "error": "", "duration_ms": 0, "retries": 0,
@@ -295,12 +550,10 @@ async def executor_node(state: AgentState) -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    msg_content = f"Step {idx+1}/{len(plan)} [{tool_name}]: {status}"
-    if status == "failed":
-        msg_content += f" — {error_msg[:200]}"
+    msg_content = _step_message(idx, len(plan), tool_name, status, error_msg, resolved_params, result)
 
     return {
-        "step_results": [step_result],
+        "step_results": state.get("step_results", []) + [step_result],
         "steps_taken": steps_taken + 1,
         "estimated_cost": cost + step_cost,
         "status": "verifying",
@@ -373,7 +626,10 @@ def _strip_invalid_params(tool_name: str, params: dict) -> dict:
     Falls back to the original params if the schema cannot be read.
     """
     from dqe_agent.tools import get_tool as _get_tool
-    tool_obj = _get_tool(tool_name)
+    try:
+        tool_obj = _get_tool(tool_name)
+    except KeyError:
+        return params
     if tool_obj is None:
         return params
     try:
@@ -584,11 +840,13 @@ def _normalize_tool_params(
 
     if tool_name == "jira_create_sprint":
         # start_date / end_date are required by the MCP schema.
-        # Default to today → today+14 days if not provided or unresolved.
-        from datetime import date, timedelta
-        today = date.today()
-        default_start = today.isoformat()
-        default_end = (today + timedelta(days=14)).isoformat()
+        # Default to tomorrow → tomorrow+14 days to avoid Jira rejecting today as "in the past".
+        # Use timezone-aware ISO format (UTC) to avoid offset-naive vs offset-aware comparison errors.
+        from datetime import datetime, timezone, timedelta
+        now_utc = datetime.now(timezone.utc)
+        tomorrow_utc = now_utc + timedelta(days=1)
+        default_start = tomorrow_utc.strftime("%Y-%m-%dT00:00:00+00:00")
+        default_end = (tomorrow_utc + timedelta(days=14)).strftime("%Y-%m-%dT00:00:00+00:00")
 
         def _is_date(v: Any) -> bool:
             if not isinstance(v, str):
@@ -597,10 +855,10 @@ def _normalize_tool_params(
             return bool(_red.match(r'^\d{4}-\d{2}-\d{2}', v.strip()))
 
         if not _is_date(params.get("start_date")):
-            logger.info("[EXECUTOR] jira_create_sprint: defaulting start_date to %s", default_start)
+            logger.info("[EXECUTOR] jira_create_sprint: defaulting start_date to %s (tomorrow)", default_start)
             params["start_date"] = default_start
         if not _is_date(params.get("end_date")):
-            logger.info("[EXECUTOR] jira_create_sprint: defaulting end_date to %s", default_end)
+            logger.info("[EXECUTOR] jira_create_sprint: defaulting end_date to %s (tomorrow+14)", default_end)
             params["end_date"] = default_end
 
         # board_id: recover from prior selection if still a template
@@ -669,6 +927,135 @@ def _normalize_tool_params(
             if recovered_summary:
                 logger.info("[EXECUTOR] jira_create_issue: recovered summary=%r from step results", recovered_summary)
                 params["summary"] = recovered_summary
+
+    # ── jira_add_comment: comment field aliases ──────────────────────────────
+    if tool_name == "jira_add_comment":
+        for alias in ("text", "message", "body", "content", "note"):
+            if alias in params and "comment" not in params:
+                params["comment"] = params.pop(alias)
+                break
+
+    # ── jira_add_worklog: time_spent conversion + aliases ───────────────────
+    if tool_name == "jira_add_worklog":
+        for alias in ("hours", "time", "duration", "logged_time", "work_time"):
+            if alias in params and "time_spent" not in params:
+                params["time_spent"] = params.pop(alias)
+                break
+        # Convert plain-English durations to Jira format
+        ts = params.get("time_spent", "")
+        if ts and isinstance(ts, str):
+            import re as _rts
+            # "1.5 hours" / "1.5h" → "1h 30m"
+            frac = _rts.match(r'^(\d+(?:\.\d+))\s*h', ts.strip(), _rts.IGNORECASE)
+            if frac:
+                total_minutes = int(float(frac.group(1)) * 60)
+                h, m = divmod(total_minutes, 60)
+                params["time_spent"] = f"{h}h {m}m" if m else f"{h}h"
+            else:
+                # "3 hours" → "3h"
+                ts2 = _rts.sub(r'(\d+)\s*hours?', r'\1h', ts, flags=_rts.IGNORECASE)
+                # "30 minutes" / "30 mins" → "30m"
+                ts2 = _rts.sub(r'(\d+)\s*min(?:utes?)?', r'\1m', ts2, flags=_rts.IGNORECASE)
+                params["time_spent"] = ts2.strip()
+
+    # ── jira_create_issue_link: field aliases + direction normalization ───────
+    if tool_name == "jira_create_issue_link":
+        for alias in ("type", "relationship", "link", "link_type_name"):
+            if alias in params and "link_type" not in params:
+                params["link_type"] = params.pop(alias)
+                break
+        for alias in ("from_issue", "source", "source_issue", "issue", "issue_key"):
+            if alias in params and "inward_issue" not in params:
+                params["inward_issue"] = params.pop(alias)
+                break
+        for alias in ("to_issue", "target", "target_issue", "related_issue"):
+            if alias in params and "outward_issue" not in params:
+                params["outward_issue"] = params.pop(alias)
+                break
+
+    # ── jira_update_sprint: state aliases ───────────────────────────────────
+    if tool_name == "jira_update_sprint":
+        state_val = params.get("state", "")
+        if isinstance(state_val, str):
+            _state_map = {
+                "start": "active", "begin": "active", "open": "active",
+                "close": "closed", "end": "closed", "complete": "closed", "finish": "closed",
+            }
+            params["state"] = _state_map.get(state_val.lower(), state_val)
+
+    # ── jira_assign_issue: resolve "me" to configured username ──────────────
+    if tool_name == "jira_assign_issue":
+        acct = params.get("account_id", "")
+        if isinstance(acct, str) and acct.lower() in ("me", "myself", "currentuser", "current_user"):
+            from dqe_agent.config import settings as _cfg
+            if _cfg.jira_username:
+                params["account_id"] = _cfg.jira_username
+                logger.info("[EXECUTOR] jira_assign_issue: resolved 'me' to %s", _cfg.jira_username)
+
+    # ── jira_search_users: query aliases ─────────────────────────────────────
+    if tool_name == "jira_search_users":
+        for alias in ("name", "username", "user", "person", "search"):
+            if alias in params and "query" not in params:
+                params["query"] = params.pop(alias)
+                break
+
+    # ── jira_transition_issue: extract transition_id from get_transitions result ──
+    if tool_name == "jira_transition_issue":
+        tid = params.get("transition_id", "")
+        if isinstance(tid, (list, dict)) or (isinstance(tid, str) and (tid.startswith("[") or tid.startswith("{"))):
+            # The transition_id is a raw result from jira_get_transitions — extract by target status
+            # Look at the task context (step description) for the target status name
+            try:
+                transitions = json.loads(tid) if isinstance(tid, str) else tid
+                if not isinstance(transitions, list):
+                    transitions = transitions.get("transitions", transitions.get("values", []))
+
+                # Try to find by matching known status names from context
+                _TARGET_NAMES = {
+                    "done": ["done", "complete", "closed", "resolved", "finish"],
+                    "in progress": ["in progress", "inprogress", "start", "working", "active"],
+                    "in review": ["in review", "review", "pr review", "code review"],
+                    "to do": ["to do", "todo", "backlog", "open", "reopen"],
+                    "testing": ["testing", "qa", "test", "in testing"],
+                    "blocked": ["blocked", "impediment"],
+                }
+
+                # Try to match against task description for target status
+                target_hint = (flow_data or {}).get("_target_status", "")
+                if not target_hint:
+                    # Check description field from step
+                    target_hint = str(params.get("_description", "")).lower()
+
+                best_id = None
+                for t in transitions:
+                    if not isinstance(t, dict):
+                        continue
+                    t_name = (t.get("name") or t.get("to", {}).get("name") or "").lower()
+                    t_id = str(t.get("id", ""))
+                    if not t_id:
+                        continue
+
+                    for canonical, aliases in _TARGET_NAMES.items():
+                        if any(a in target_hint for a in aliases):
+                            if any(a in t_name for a in aliases):
+                                best_id = t_id
+                                break
+                    if best_id:
+                        break
+
+                if not best_id and transitions:
+                    # Fallback: take the first non-initial transition
+                    for t in transitions:
+                        if isinstance(t, dict) and t.get("id"):
+                            best_id = str(t["id"])
+                            break
+
+                if best_id:
+                    logger.info("[EXECUTOR] jira_transition_issue: extracted transition_id=%s", best_id)
+                    params["transition_id"] = best_id
+
+            except Exception as _exc:
+                logger.warning("[EXECUTOR] jira_transition_issue: could not extract transition_id: %s", _exc)
 
     # ── Google Calendar read tools: defaults + injection ─────────────────────
     _CALENDAR_EVENT_TOOLS = {"get_events", "list_events", "calendar_get_events", "calendar_list_events",

@@ -74,7 +74,8 @@ class AgentState(TypedDict, total=False):
     current_step_index: Annotated[int, _replace]
 
     # ── Execution tracking ───────────────────────────────────────────────
-    step_results: Annotated[list, _append_list]
+    # _replace: executor accumulates manually; planner resets to [] on new task
+    step_results: Annotated[list, _replace]
     retry_count: Annotated[int, _replace]
     replan_count: Annotated[int, _replace]
 
@@ -83,8 +84,9 @@ class AgentState(TypedDict, total=False):
     estimated_cost: Annotated[float, _replace]
     start_time: Annotated[float, _replace]
 
-    # ── Generic data store (per-flow, merged across steps) ───────────────
-    flow_data: Annotated[dict, _merge_dicts]
+    # ── Generic data store (per-flow) ────────────────────────────────────
+    # _replace: executor accumulates manually; planner resets to {} on new task
+    flow_data: Annotated[dict, _replace]
 
     # ── Control ──────────────────────────────────────────────────────────
     status: Annotated[str, _replace]   # idle, planning, executing, verifying, complete, failed, awaiting_human

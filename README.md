@@ -1,61 +1,84 @@
 # DQE Agent
 
-> Conversational AI agent — talk to it, watch it work live in your browser iframe.
+Conversational AI agent that talks to Jira, Gmail, Google Calendar, and automates browsers (NetSuite, CPQ). Chat with it naturally — it plans steps, executes them, and confirms what it did.
 
 ---
 
 ## What it does
 
-You chat with the agent. It automates NetSuite and CPQ in a real browser. Your frontend shows the browser live alongside the chat.
+**Jira** (via MCP — no browser, fast)
+- Query your issues, sprint status, team workload, blockers
+- Create tickets, subtasks, bugs, stories
+- Transition status, change priority, assign issues
+- Log time, add comments, link issues
+- Move issues to sprints, create/start/close sprints
+- Daily standup digest
 
-**Use Case 1 — Opportunity to Quote:**
-- "Create a quote for OP-20080"
-- Agent logs into NetSuite → extracts opportunity data → logs into CPQ → fills the quote wizard → fetches price → pauses for your approval → finalizes → sends email
+**Google Workspace** (via MCP — no browser, fast)
+- Read and send Gmail
+- Create, update, and query Google Calendar events
+- Check free/busy availability
+
+**Browser automation** (Playwright — visual, slower)
+- NetSuite → CPQ quote creation workflow
+- Any site that needs visual interaction
 
 ---
 
 ## Architecture
 
 ```
-Frontend (your UI)
-  │
-  │  WebSocket  ws://localhost:8000/ws/{session_id}
-  │
-  ├── Chat messages  →  Agent runs, streams back tokens + tool events
-  ├── Workflow run   →  YAML workflow runs, pauses at human gates
-  ├── Human response →  Resumes paused workflow
-  └── Browser frames ←  2 fps PNG screenshots (base64) for live iframe view
-
-REST  http://localhost:8000
-  ├── GET  /health
-  ├── GET  /api/v1/tools
-  ├── GET  /api/v1/workflows
-  ├── GET  /api/v1/sessions
-  └── POST /api/v1/reset/{session_id}
+User message
+    │
+    ▼
+Planner  (GPT-4o / large model — runs ONCE)
+    │  produces a step list
+    ▼
+Executor (GPT-4o-mini / fast model — runs per step)
+    │  calls MCP tools or browser tools
+    ▼
+Verifier (checks success, retries or replans)
+    │
+    ▼
+Response streamed to frontend via WebSocket
 ```
+
+**Fast path:** common Jira queries (show my issues, show blockers, etc.) bypass the LLM entirely via regex matching — response in under 2 seconds.
+
+**Session isolation:** each WebSocket connection has its own LangGraph thread with SQLite checkpointing. Conversations are independent.
 
 ---
 
 ## WebSocket Protocol
 
+### Connect
+
+```
+ws://localhost:8000/ws/{session_id}
+```
+
+Use any UUID as `session_id`. One session per browser tab / user.
+
+---
+
 ### Client → Server
 
-| Type | Fields | When to send |
+| Type | Fields | When |
 |---|---|---|
-| `chat` | `content: string` | User types a message |
+| `chat` | `content: string` | User sends a message |
+| `run_task` | `task: string` | Run a specific task string directly |
 | `run_workflow` | `workflow: string`, `inputs: object` | Run a named YAML workflow |
 | `human_response` | `content: string` | Reply to a `human_review` gate |
+| `selection_response` | `value: string \| string[]` | Reply to a `selection_request` |
 | `ping` | — | Keep-alive |
 
-**Examples:**
 ```json
-{"type": "chat", "content": "Create a quote for OP-20080"}
-
-{"type": "run_workflow", "workflow": "opportunity_to_quote",
- "inputs": {"opportunity_id": "OP-20080"}}
-
-{"type": "human_response", "content": "proceed"}
-
+{"type": "chat",              "content": "show my open issues"}
+{"type": "chat",              "content": "move FLAG-42 to done"}
+{"type": "chat",              "content": "log 2 hours on FLAG-42"}
+{"type": "run_workflow",      "workflow": "opportunity_to_quote", "inputs": {"opportunity_id": "OP-20080"}}
+{"type": "human_response",    "content": "proceed"}
+{"type": "selection_response","value": "SP-23"}
 {"type": "ping"}
 ```
 
@@ -66,125 +89,32 @@ REST  http://localhost:8000
 | Type | Key fields | Meaning |
 |---|---|---|
 | `connected` | `session_id` | Handshake confirmed |
-| `agent_text` | `content` | Agent is thinking / speaking (stream) |
-| `tool_start` | `tool`, `args` | Agent is calling a browser tool |
-| `tool_done` | `tool`, `result` | Tool finished |
-| `agent_done` | `content` | Agent's complete final reply |
-| `browser_frame` | `data` (base64 PNG), `width`, `height` | Live browser screenshot @ 2 fps |
-| `workflow_step` | `step`, `status` | YAML step started or completed |
-| `human_review` | `question` | Workflow paused — needs human input |
-| `workflow_done` | `summary` | Workflow finished |
+| `agent_text` | `content` | Streaming token (append to chat bubble) |
+| `agent_done` | `content` | Final complete reply |
+| `tool_start` | `tool`, `args` | A tool call is starting |
+| `tool_done` | `tool`, `result` | Tool call finished |
+| `plan_created` | `steps: []` | Planner produced a step list |
+| `step_status` | `step`, `status` | A step started / completed / failed |
+| `browser_frame` | `data` (base64 PNG), `width`, `height` | Live browser screenshot at ~2 fps |
+| `selection_request` | `question`, `options: [{value,label}]`, `multi_select` | Agent needs user to pick from a list |
+| `human_review` | `question` | Workflow paused — needs approval |
+| `workflow_done` | `summary` | Workflow completed |
 | `error` | `message` | Something went wrong |
 | `pong` | — | Reply to ping |
 
-**Examples:**
 ```json
-{"type": "connected",    "session_id": "abc123"}
-{"type": "agent_text",   "content": "Logging into NetSuite now..."}
-{"type": "tool_start",   "tool": "browser_login", "args": {"system": "netsuite"}}
-{"type": "tool_done",    "tool": "browser_login", "result": "logged_in"}
-{"type": "agent_done",   "content": "Quote created. Quote ID: QUT-160326-0014296"}
-{"type": "browser_frame","data": "<base64>", "width": 1280, "height": 800}
-{"type": "workflow_step","step": "netsuite_login", "status": "done"}
-{"type": "human_review", "question": "Please review:\n  Buyer: 1158 EQT Corporation\n  Bandwidth: 500 Mbps\n  ..."}
-{"type": "workflow_done","summary": "Workflow 'opportunity_to_quote' completed."}
-{"type": "error",        "message": "Login failed: check credentials in .env"}
-```
-
----
-
-## Frontend Integration Guide
-
-### Connect to WebSocket
-
-```javascript
-const sessionId = crypto.randomUUID();
-const ws = new WebSocket(`ws://localhost:8000/ws/${sessionId}`);
-
-ws.onmessage = (event) => {
-  const msg = JSON.parse(event.data);
-
-  switch (msg.type) {
-    case "connected":
-      console.log("Connected:", msg.session_id);
-      break;
-
-    case "agent_text":
-      // Append to chat bubble (streaming)
-      appendToChat("agent", msg.content);
-      break;
-
-    case "agent_done":
-      // Mark the chat bubble as complete
-      finalizeChat("agent", msg.content);
-      break;
-
-    case "tool_start":
-      // Show activity indicator: "Calling browser_login..."
-      showActivity(msg.tool, msg.args);
-      break;
-
-    case "tool_done":
-      // Update activity: "browser_login done"
-      doneActivity(msg.tool, msg.result);
-      break;
-
-    case "browser_frame":
-      // Render live browser in an <img> or <canvas>
-      browserImg.src = `data:image/png;base64,${msg.data}`;
-      break;
-
-    case "workflow_step":
-      // Update a step-progress list
-      updateStep(msg.step, msg.status);
-      break;
-
-    case "human_review":
-      // Show approval dialog with msg.question
-      // User clicks Proceed / types response
-      showReviewDialog(msg.question, (response) => {
-        ws.send(JSON.stringify({ type: "human_response", content: response }));
-      });
-      break;
-
-    case "workflow_done":
-      showSuccess(msg.summary);
-      break;
-
-    case "error":
-      showError(msg.message);
-      break;
-  }
-};
-```
-
-### Send a chat message
-
-```javascript
-ws.send(JSON.stringify({ type: "chat", content: "Create a quote for OP-20080" }));
-```
-
-### Run a workflow directly
-
-```javascript
-ws.send(JSON.stringify({
-  type: "run_workflow",
-  workflow: "opportunity_to_quote",
-  inputs: { opportunity_id: "OP-20080" }
-}));
-```
-
-### Show browser live in an img tag
-
-```html
-<img id="browser-view" style="width:100%; border:1px solid #ccc;" />
-```
-
-```javascript
-case "browser_frame":
-  document.getElementById("browser-view").src =
-    `data:image/png;base64,${msg.data}`;
-  break;
+{"type": "connected",         "session_id": "abc123"}
+{"type": "agent_text",        "content": "Looking up your issues..."}
+{"type": "plan_created",      "steps": [{"id": "jira_q", "tool": "jira_search", ...}]}
+{"type": "step_status",       "step": "jira_q", "status": "running"}
+{"type": "step_status",       "step": "jira_q", "status": "done"}
+{"type": "agent_done",        "content": "**5 issues found:**\n\n**FLAG-42** — Login crash..."}
+{"type": "selection_request", "question": "Which sprint?",
+                              "options": [{"value": "23", "label": "Sprint 23 (Active)"}],
+                              "multi_select": false}
+{"type": "human_review",      "question": "Buyer: EQT Corp\nBandwidth: 500 Mbps\n\nType 'proceed' to continue."}
+{"type": "browser_frame",     "data": "<base64>", "width": 1280, "height": 800}
+{"type": "error",             "message": "Jira API token missing — set JIRA_API_TOKEN in .env"}
 ```
 
 ---
@@ -193,67 +123,84 @@ case "browser_frame":
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/health` | Server status |
-| GET | `/api/v1/tools` | List all agent tools |
+| GET | `/health` | Server status + uptime |
+| GET | `/api/v1/tools` | List all loaded tools (MCP + browser) |
 | GET | `/api/v1/workflows` | List available YAML workflows |
 | GET | `/api/v1/sessions` | Active WebSocket sessions |
-| POST | `/api/v1/reset/{session_id}` | Clear conversation history |
-| GET | `/docs` | Auto-generated Swagger UI |
+| POST | `/api/v1/reset/{session_id}` | Clear conversation history for a session |
+| GET | `/docs` | Swagger UI |
 
 ---
 
-## Setup & Run
+## Setup
 
-### 1. Configure `.env`
+### 1. Install Python dependencies
+
+```bash
+pip install -e .
+```
+
+To also enable MCP tools (Jira, Gmail, Calendar):
+
+```bash
+pip install -e ".[dev]"
+```
+
+### 2. Install Playwright browser
+
+```bash
+playwright install chromium
+```
+
+Skip this if you set `DISABLE_BROWSER_TOOLS=true` (Jira/Gmail-only mode).
+
+### 3. Install MCP servers
+
+```bash
+# Jira
+pip install mcp-atlassian
+
+# Google Workspace (Gmail + Calendar)
+pip install workspace-mcp
+```
+
+### 4. Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
+Open `.env` and fill in your values. The minimum required for Jira features:
+
 ```bash
-# LLM (GPT-mini for everything — planning + extraction)
-LLM_PROVIDER=azure
-LLM_MODEL=gpt-4o-mini
-AZURE_OPENAI_API_KEY=...
-AZURE_OPENAI_ENDPOINT=https://...
-AZURE_OPENAI_API_VERSION=2024-02-01
-AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
-
-# NetSuite
-NETSUITE_URL=https://your-account.app.netsuite.com
-NETSUITE_USERNAME=user@company.com
-NETSUITE_PASSWORD=secret
-
-# CPQ
-CPQ_URL=https://dqe-cpq.cloudsmartz.com
-CPQ_USERNAME=user@company.com
-CPQ_PASSWORD=secret
-
-# Email
-SMTP_HOST=smtp.office365.com
-SMTP_PORT=587
-SMTP_USERNAME=...
-SMTP_PASSWORD=...
-EMAIL_FROM=quotes@dqe.com
-
-# Browser
-HEADLESS=false        # false = browser window visible on server
+JIRA_URL=https://your-company.atlassian.net
+JIRA_USERNAME=you@company.com
+JIRA_API_TOKEN=your_api_token_here      # https://id.atlassian.com/manage-profile/security/api-tokens
 ```
 
-### 2. Install
+For Gmail + Calendar, run the one-time OAuth setup:
 
 ```bash
-pip install -e .
-playwright install chromium
+python setup_google_auth.py
 ```
 
-### 3. Start
+### 5. Start the server
 
 ```bash
+# Windows
+python run.py
+
+# Cross-platform
 uvicorn dqe_agent.api:app --reload --port 8000
 ```
 
-Server is ready at `http://localhost:8000` — connect your frontend to `ws://localhost:8000/ws/{any-session-id}`.
+Server is ready at `http://localhost:8000`. Connect your frontend to `ws://localhost:8000/ws/{any-uuid}`.
+
+---
+
+## Jira-only mode (no browser)
+
+Set `DISABLE_BROWSER_TOOLS=true` in `.env`. The server starts without Playwright — faster startup, lower memory, works headless. All Jira and Gmail features still work.
 
 ---
 
@@ -261,80 +208,137 @@ Server is ready at `http://localhost:8000` — connect your frontend to `ws://lo
 
 ```
 DQE Agent/
-├── .env.example
+├── .env.example                      ← copy to .env, fill in credentials
+├── mcp_config.yaml                   ← MCP server declarations
 ├── pyproject.toml
+├── run.py                            ← Windows start script
+│
 ├── workflows/
-│   └── opportunity_to_quote.yaml     ← Use Case 1 steps
+│   └── opportunity_to_quote.yaml    ← NetSuite → CPQ workflow definition
+│
+├── tests/
+│   ├── test_graph.py                 ← schema / model smoke tests
+│   ├── test_jira_unit.py             ← 77 unit tests (no API calls needed)
+│   └── test_browser_session_input.py
 │
 └── src/dqe_agent/
-    ├── api.py                        ← ★ FastAPI + WebSocket server (START HERE)
-    ├── config.py                     ← Reads .env
-    ├── llm.py                        ← GPT-mini factory
-    ├── engine.py                     ← YAML → LangGraph builder
-    ├── graph.py                      ← Tool loader
-    ├── prompts.py                    ← All LLM instructions (tunable)
-    │
-    ├── browser/
-    │   ├── manager.py                ← Playwright session lifecycle
-    │   └── dom_agent.py             ← DOM extraction → GPT-mini → Playwright actions
+    ├── api.py                        ← FastAPI + WebSocket server
+    ├── config.py                     ← Settings loaded from .env
+    ├── state.py                      ← AgentState TypedDict (LangGraph)
+    ├── llm.py                        ← LLM factory (Azure / OpenAI / Anthropic)
+    ├── guardrails.py                 ← Step/cost/timeout limits
+    ├── observability.py              ← Tool call tracing
     │
     ├── agent/
-    │   └── master.py                 ← Conversational LangGraph ReAct agent
+    │   ├── master.py                 ← MasterAgent: SQLite checkpointer + graph compile
+    │   ├── loop.py                   ← PEV LangGraph graph builder
+    │   ├── planner.py                ← Planner node + fast-path regex bypass
+    │   ├── executor.py               ← Executor node + tool normalisation
+    │   └── verifier.py               ← Verifier node + retry/replan logic
     │
-    ├── schemas/
-    │   └── models.py                 ← OpportunityData, QuoteData, …
+    ├── browser/
+    │   ├── manager.py                ← Playwright lifecycle, per-session contexts
+    │   ├── dom_agent.py              ← DOM extraction → LLM → Playwright actions
+    │   └── webrtc.py                 ← WebRTC screen streaming
     │
-    └── tools/
-        ├── browser_tools.py          ← login, search, extract, fill_form, click
-        └── human_tools.py            ← human_review (LangGraph interrupt)
+    ├── tools/
+    │   ├── __init__.py               ← Tool registry (auto-discovery)
+    │   ├── browser_tools.py          ← login, navigate, act, extract, snapshot
+    │   ├── human_tools.py            ← human_review (LangGraph interrupt)
+    │   ├── selection_tool.py         ← request_selection (dropdown UI)
+    │   ├── respond_tool.py           ← direct_response (no-tool replies)
+    │   └── mcp_loader.py             ← Loads MCP tools at startup
+    │
+    ├── flows/
+    │   ├── _default.py               ← Default conversational flow config
+    │   └── opportunity_to_quote.py   ← Quote creation flow config
+    │
+    └── schemas/
+        └── models.py                 ← OpportunityData, QuoteData, EmailPayload, …
 ```
+
+---
+
+## Running Tests
+
+```bash
+# All tests
+pytest
+
+# Just the Jira unit tests (no API/browser needed)
+pytest tests/test_jira_unit.py -v
+```
+
+The Jira unit tests (`test_jira_unit.py`) cover 77 cases — fast-path query matching, result formatting, empty-state messages, and parameter normalisation. They run in under 1 second with no network access.
 
 ---
 
 ## Human Review Gates (workflow mode)
 
-When the workflow hits a review gate, the server sends:
+When the quote workflow reaches a review step, the server sends:
+
 ```json
-{"type": "human_review", "question": "Please review:\n  Buyer: 1158 EQT Corporation\n  Bandwidth: 500 Mbps\n  IP: /29\n  Contact: Andy Guley\n\nType 'proceed' to continue or describe corrections."}
+{"type": "human_review", "question": "Please review:\n  Buyer: EQT Corporation\n  Bandwidth: 500 Mbps\n\nType 'proceed' to continue or describe corrections."}
 ```
 
-Your frontend should show a modal/panel with the question. When the user responds:
+The frontend shows a prompt. When the user responds:
+
 ```json
 {"type": "human_response", "content": "proceed"}
 ```
 
-The workflow resumes automatically.
+The workflow resumes. To correct a field, the user types the correction and the agent replans.
 
-| Gate | Trigger | Accepted inputs |
+| Gate | When | Accepted |
 |---|---|---|
 | `review_info` | After NetSuite extraction | `proceed` / corrections |
-| `review_contact` | Before CPQ contact section | `proceed` / new contact |
-| `review_approvers` | Before finalize | `no` (on-net) / approver names |
+| `review_contact` | Before CPQ contact section | `proceed` / new contact details |
+| `review_approvers` | Before CPQ finalize | `no` (on-net) / approver names |
 | `review_email` | Before sending email | `send` / edits |
 
 ---
 
-## How the DOM Agent Works
+## Selection Requests (Jira workflows)
 
-No screenshots sent to AI. Instead:
+When the agent needs the user to pick from a list (e.g. which sprint, which board):
 
-```
-1. JavaScript runs in the live page
-   → extracts all inputs, selects, checkboxes, buttons as structured text
-
-2. GPT-mini receives:
-   "URL: https://dqe-cpq.../quotes/new
-    [INPUTS] label='Street Address' selector='[placeholder="Enter address"]'
-    [BUTTONS] 'Next'  'Locate on Map'
-    INSTRUCTION: Fill bandwidth = 500 Mbps"
-
-3. GPT-mini returns JSON actions:
-   [{"type":"fill","selector":"[placeholder='Amount']","value":"500"},
-    {"type":"select_option","selector":"select[name='unit']","value":"Mbps"}]
-
-4. Playwright executes each action
-
-5. Loop until done=true
+```json
+{
+  "type": "selection_request",
+  "question": "Which sprint should I move FLAG-42 to?",
+  "options": [
+    {"value": "42", "label": "Sprint 24 – Active"},
+    {"value": "41", "label": "Sprint 23 – Closed"}
+  ],
+  "multi_select": false
+}
 ```
 
-Fast (no image round-trips), cheap (text model), reliable (CSS selectors).
+The frontend renders a dropdown or button group. Reply:
+
+```json
+{"type": "selection_response", "value": "42"}
+```
+
+---
+
+## MCP Configuration
+
+MCP servers are declared in `mcp_config.yaml`. Credentials come from `.env` via `${VAR}` substitution.
+
+| Server | Package | What it provides |
+|---|---|---|
+| `jira` | `mcp-atlassian` | 170+ Jira tools (search, create, transition, sprint, …) |
+| `google-workspace` | `workspace-mcp` | Gmail + Google Calendar tools |
+| `brave-search` | `mcp-server-brave-search` | Web search (disabled by default) |
+
+To enable Brave Search: set `enabled: true` in `mcp_config.yaml` and add `BRAVE_API_KEY` to `.env`.
+
+---
+
+## Linting
+
+```bash
+ruff check src/
+ruff format src/
+```

@@ -545,20 +545,20 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
    "params": {"question": "Which Jira project?", "options": <<JIRA_PROJECTS_PREFETCHED>>, "multi_select": false},
    "success_criteria": "Project selected"},
   {"id": "create", "type": "api", "description": "Create the Jira task", "tool": "jira_create_issue",
-   "params": {"project_key": "{{sel_proj.selected}}", "issue_type": "Task", "summary": "Describe task here"},
-   "success_criteria": "Issue created successfully"}
-]
-
-── EXAMPLE: create a Jira sprint ──
-[
-  {"id": "sel_proj", "tool": "request_selection", "params": {"question": "Which Jira project?", "options": "<<JIRA_PROJECTS_PREFETCHED>>", "multi_select": false}, "success_criteria": "Project selected"},
-  {"id": "get_boards", "tool": "jira_get_agile_boards", "params": {"project_key": "{{sel_proj.selected}}"}, "success_criteria": "Boards listed"},
-  {"id": "sel_board", "tool": "request_selection", "params": {"question": "Which board?", "options": "{{get_boards.boards}}", "multi_select": false}, "success_criteria": "Board selected"},
-  {"id": "ask_name", "tool": "ask_user", "params": {"question": "Sprint name?"}, "success_criteria": "Sprint name provided"},
-  {"id": "create_sprint", "tool": "jira_create_sprint", "params": {"board_id": "{{sel_board.selected}}", "name": "{{ask_name.answer}}"}, "success_criteria": "Sprint created"}
-]
-Note: start_date and end_date are auto-filled by the executor. Do NOT ask for them.
-
+   "params": {"project_key": "{{sel_proj.selected}}", "issue_type": "Task", "summary": "Describe task here"},
+   "success_criteria": "Issue created successfully"}
+]
+
+── EXAMPLE: create a Jira sprint ──
+[
+  {"id": "sel_proj", "tool": "request_selection", "params": {"question": "Which Jira project?", "options": "<<JIRA_PROJECTS_PREFETCHED>>", "multi_select": false}, "success_criteria": "Project selected"},
+  {"id": "get_boards", "tool": "jira_get_agile_boards", "params": {"project_key": "{{sel_proj.selected}}"}, "success_criteria": "Boards listed"},
+  {"id": "sel_board", "tool": "request_selection", "params": {"question": "Which board?", "options": "{{get_boards.boards}}", "multi_select": false}, "success_criteria": "Board selected"},
+  {"id": "ask_name", "tool": "ask_user", "params": {"question": "Sprint name?"}, "success_criteria": "Sprint name provided"},
+  {"id": "create_sprint", "tool": "jira_create_sprint", "params": {"board_id": "{{sel_board.selected}}", "name": "{{ask_name.answer}}"}, "success_criteria": "Sprint created"}
+]
+Note: start_date and end_date are auto-filled by the executor. Do NOT ask for them.
+
 
 ⛔ NEVER pass jira_get_transitions result directly as transition_id (it's a list, not a string).
 
@@ -605,6 +605,152 @@ Note: start_date and end_date are auto-filled by the executor. Do NOT ask for th
     {"id":"do_tr","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{sel_tr.selected}}"},"success_criteria":"Done"}
   ]
 
+── DIRECT-ANSWER QUERIES (count / filter / list) ──
+  Use jira_search(jql=..., limit=N) then direct_response. Always exactly 2 steps.
+  NEVER add project-selection steps for read-only queries — JQL is sufficient.
+
+  JQL reference (use these exactly):
+    My open issues:         assignee = currentUser() AND status != Done
+    By priority:            priority = Critical  (or Blocker, High, Medium, Low)
+    By status:              status = "In Progress"  (or "In Review", "To Do", "Done", "Testing")
+    Unassigned:             assignee is EMPTY
+    In active sprint:       sprint in openSprints()
+    Blocked:                priority = Blocker AND status != Done
+    Done recently:          status = Done AND updated >= -1d
+    Combine freely:         assignee = currentUser() AND status = "In Progress"
+
+  Count query ("how many X do I have?"):
+  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status != Done","limit":1},"success_criteria":"Count returned"},
+   {"id":"r","tool":"direct_response","params":{"message":"You have {{s.total}} open issues."}}]
+
+  List query ("show all critical issues"):
+  [{"id":"s","tool":"jira_search","params":{"jql":"priority = Critical AND status != Done","limit":25},"success_criteria":"Issues listed"},
+   {"id":"r","tool":"direct_response","params":{"message":"Critical open issues:\n{{s}}"}}]
+
+  Assignee workload ("what is Tom working on?"):
+  [{"id":"find","tool":"jira_search_users","params":{"query":"Tom"},"success_criteria":"User found"},
+   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{find.accountId}}\" AND status != Done","limit":15},"success_criteria":"Issues listed"},
+   {"id":"r","tool":"direct_response","params":{"message":"Tom's open issues:\n{{s}}"}}]
+
+  Sprint days remaining ("how many days left in sprint?"):
+  [{"id":"sp","tool":"jira_get_active_sprints","params":{},"success_criteria":"Sprint info returned"},
+   {"id":"r","tool":"direct_response","params":{"message":"Active sprint info (calculate days from endDate):\n{{sp}}"}}]
+
+── ADD COMMENT (jira_add_comment) ──
+  Tool: jira_add_comment
+  Params: issue_key* (string, e.g. "FLAG-42"), comment* (string — the text to add)
+
+  If issue_key not in task → ask_user.
+  If comment text not in task → ask_user.
+  If issue_key IS in task and comment IS in task (after colon, or in quotes) → skip ask_user steps.
+
+  [{"id":"add","tool":"jira_add_comment","params":{"issue_key":"FLAG-42","comment":"Ready for QA review"},"success_criteria":"Comment added"},
+   {"id":"done","tool":"direct_response","params":{"message":"Comment added to FLAG-42."}}]
+
+── LOG TIME / WORKLOG (jira_add_worklog) ──
+  Tool: jira_add_worklog
+  Params: issue_key* (string), time_spent* (string — "3h", "30m", "1h 30m"), comment (string, optional)
+
+  time_spent format: "3h" not "3 hours". Executor auto-converts plain English to Jira format.
+  If issue_key not in task → ask_user.
+  If hours not in task → ask_user ("How many hours? e.g. 2h, 30m, 1.5h").
+
+  [{"id":"ask_h","tool":"ask_user","params":{"question":"How many hours to log? (e.g. 2h, 30m, 1.5h)"}},
+   {"id":"log","tool":"jira_add_worklog","params":{"issue_key":"FLAG-42","time_spent":"{{ask_h.answer}}","comment":"API implementation"},"success_criteria":"Time logged"},
+   {"id":"done","tool":"direct_response","params":{"message":"Logged {{ask_h.answer}} on FLAG-42."}}]
+
+── LINK ISSUES (jira_create_issue_link) ──
+  Tool: jira_create_issue_link
+  Params: link_type* (string), inward_issue* (string key), outward_issue* (string key)
+
+  Direction rules:
+    "A blocks B"          → link_type="blocks",          inward_issue="A",  outward_issue="B"
+    "A is blocked by B"   → link_type="is blocked by",   inward_issue="A",  outward_issue="B"
+    "A relates to B"      → link_type="relates to",       inward_issue="A",  outward_issue="B"
+    "A duplicates B"      → link_type="duplicates",       inward_issue="A",  outward_issue="B"
+    "A is duplicate of B" → link_type="is duplicated by", inward_issue="A",  outward_issue="B"
+
+  If link_type ambiguous → jira_get_link_types() then request_selection.
+
+  [{"id":"lnk","tool":"jira_create_issue_link","params":{"link_type":"is blocked by","inward_issue":"FLAG-42","outward_issue":"INFRA-89"},"success_criteria":"Link created"},
+   {"id":"done","tool":"direct_response","params":{"message":"Linked: FLAG-42 is blocked by INFRA-89."}}]
+
+── ASSIGN ISSUE (jira_assign_issue) ──
+  Tool: jira_assign_issue
+  Params: issue_key* (string), account_id* (string — Jira accountId, NOT a display name)
+
+  NEVER pass a display name as account_id. Always resolve first.
+
+  "Assign to <name>":
+    1. jira_search_users(query="<name>") → get accountId
+    2. jira_assign_issue(issue_key=..., account_id="{{find_user.accountId}}")
+
+  "Assign to me" / "Take it":
+    jira_assign_issue(issue_key=..., account_id="me")
+    (executor auto-substitutes "me" with the configured jira_username)
+
+  Example "Assign FLAG-42 to Rachel":
+  [{"id":"find","tool":"jira_search_users","params":{"query":"Rachel"},"success_criteria":"User found"},
+   {"id":"asgn","tool":"jira_assign_issue","params":{"issue_key":"FLAG-42","account_id":"{{find.accountId}}"},"success_criteria":"Assigned"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 assigned to Rachel ({{find.displayName}})."}}]
+
+  Example "Assign FLAG-42 to me":
+  [{"id":"asgn","tool":"jira_assign_issue","params":{"issue_key":"FLAG-42","account_id":"me"},"success_criteria":"Assigned"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 assigned to you."}}]
+
+── REASSIGN ISSUE ──
+  Reassign = same as Assign, but first confirm current assignee via jira_get_issue if needed.
+  If user says "reassign FROM X TO Y" and issue_key is given → skip confirmation, go straight to assign.
+
+── MOVE ISSUE TO SPRINT (jira_rank_backlog_issues or jira_update_issue) ──
+  Preferred tool: look in AVAILABLE_MCP_TOOLS for jira_rank_backlog_issues or jira_move_issues_to_sprint.
+  Fallback: jira_update_issue with fields={"sprint": {"id": <sprint_id>}}
+
+  Workflow:
+  1. Fetch boards for project → jira_get_agile_boards(project_key=...)
+  2. Fetch sprints for board → jira_get_sprints(board_id=...)
+  3. request_selection → pick sprint (skip if sprint name/number given in task)
+  4. Move issue
+
+  Example "Move FLAG-42 to Sprint 23":
+  [{"id":"get_b","tool":"jira_get_agile_boards","params":{"project_key":"FLAG"},"success_criteria":"Boards listed"},
+   {"id":"get_sp","tool":"jira_get_sprints","params":{"board_id":"{{get_b._items[0].id}}"},"success_criteria":"Sprints listed"},
+   {"id":"sel_sp","tool":"request_selection","params":{"question":"Which sprint should FLAG-42 move to?","options":"{{get_sp}}","multi_select":false},"success_criteria":"Sprint selected"},
+   {"id":"mv","tool":"jira_rank_backlog_issues","params":{"sprint_id":"{{sel_sp.selected}}","issue_keys":["FLAG-42"]},"success_criteria":"Issue moved"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 moved to selected sprint."}}]
+
+── SPRINT START / CLOSE (jira_update_sprint) ──
+  Tool: jira_update_sprint
+  Params: sprint_id* (integer or string), state* ("active" to start, "closed" to end/close)
+
+  "Start sprint" → state="active"
+  "Close/end/complete sprint" → state="closed"
+
+  Workflow — fetch sprint list to get sprint_id:
+  [{"id":"get_b","tool":"jira_get_agile_boards","params":{},"success_criteria":"Boards listed"},
+   {"id":"get_sp","tool":"jira_get_sprints","params":{"board_id":"{{get_b._items[0].id}}"},"success_criteria":"Sprints listed"},
+   {"id":"sel_sp","tool":"request_selection","params":{"question":"Which sprint to start/close?","options":"{{get_sp}}","multi_select":false},"success_criteria":"Sprint selected"},
+   {"id":"upd","tool":"jira_update_sprint","params":{"sprint_id":"{{sel_sp.selected}}","state":"active"},"success_criteria":"Sprint started"},
+   {"id":"done","tool":"direct_response","params":{"message":"Sprint started."}}]
+
+── CREATE SUBTASK ──
+  Subtask = jira_create_issue with issue_type="Sub-task" and parent_key set.
+  Params: project_key*, issue_type="Sub-task"*, summary*, parent_key* (parent issue key e.g. "FLAG-42")
+
+  If parent_key not in task → ask_user.
+  If summary not in task → ask_user.
+  Project key is always derived from the parent issue key prefix.
+
+  Example "Create subtask for FLAG-42: Write unit tests":
+  [{"id":"cr","tool":"jira_create_issue","params":{"project_key":"FLAG","issue_type":"Sub-task","summary":"Write unit tests","parent_key":"FLAG-42"},"success_criteria":"Subtask created"},
+   {"id":"done","tool":"direct_response","params":{"message":"Subtask created under FLAG-42: {{cr}}"}}]
+
+── STANDUP / DAILY BRIEFING ──
+  Runs 3 parallel-intent JQL queries then aggregates into a single digest message.
+  [{"id":"my_ip","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status = 'In Progress'","limit":10},"success_criteria":"In-progress fetched"},
+   {"id":"done_y","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status = Done AND updated >= -1d","limit":10},"success_criteria":"Done yesterday fetched"},
+   {"id":"blockers","tool":"jira_search","params":{"jql":"sprint in openSprints() AND priority = Blocker AND status != Done","limit":10},"success_criteria":"Blockers fetched"},
+   {"id":"show","tool":"direct_response","params":{"message":"**Daily Standup Digest**\n\n**In Progress:**\n{{my_ip}}\n\n**Completed Yesterday:**\n{{done_y}}\n\n**Active Blockers:**\n{{blockers}}"}}]
 
 ═══════════════════════════════════════════════════════════════════
 GOOGLE CALENDAR
@@ -1274,6 +1420,136 @@ def _fix_json_control_chars(s: str) -> str:
     return ''.join(result)
 
 
+import re as _re_fast
+
+# ── Fast-path patterns for common Jira queries (bypass LLM, instant response) ─
+# Each entry: (compiled_regex, jql_template, response_template, limit)
+# jql_template may reference group(1) from the regex match.
+_FAST_JIRA_DIRECT: list[tuple] = [
+    # "how many tickets/issues do I have" / "how many issues do we have" (personal or team)
+    (
+        _re_fast.compile(
+            r'\b(how many|count)\b.{0,40}\b(tickets?|issues?|tasks?|blockers?)\b.{0,40}\b(i have|do i have|do we have|are there|assigned to me|mine)\b',
+            _re_fast.IGNORECASE,
+        ),
+        "assignee = currentUser() AND status != Done",
+        "You have {total} open issues assigned to you.",
+        1,
+    ),
+    # "count my open issues" / "count my tickets" (no trailing clause)
+    (
+        _re_fast.compile(
+            r'\b(count|how many)\b.{0,15}\bmy\b.{0,25}\b(tickets?|issues?|tasks?)\b',
+            _re_fast.IGNORECASE,
+        ),
+        "assignee = currentUser() AND status != Done",
+        "You have {total} open issues assigned to you.",
+        1,
+    ),
+    # "which (all) open tasks/issues do i have"
+    (
+        _re_fast.compile(
+            r'\bwhich\b.{0,30}\b(tasks?|issues?|tickets?)\b.{0,30}\b(i have|do i have)\b',
+            _re_fast.IGNORECASE,
+        ),
+        "assignee = currentUser() AND status != Done ORDER BY updated DESC",
+        "Your open issues:\n{results}",
+        25,
+    ),
+    # "show/list my tickets/issues"
+    (
+        _re_fast.compile(
+            r'\b(show|list|display|view)\b.{0,15}\bmy\b.{0,15}\b(tickets?|issues?|tasks?)\b',
+            _re_fast.IGNORECASE,
+        ),
+        "assignee = currentUser() AND status != Done ORDER BY updated DESC",
+        "Your open issues:\n{results}",
+        25,
+    ),
+    # "show unassigned issues" — unassigned before type noun
+    (
+        _re_fast.compile(
+            r'\b(show|list|display|what|are there)\b.{0,20}\bunassigned\b.{0,20}\b(tickets?|issues?|tasks?)\b',
+            _re_fast.IGNORECASE,
+        ),
+        "assignee is EMPTY AND sprint in openSprints() AND status != Done",
+        "Unassigned issues in the active sprint:\n{results}",
+        25,
+    ),
+    # "what tasks are unassigned?" — type noun before unassigned
+    (
+        _re_fast.compile(
+            r'\b(tasks?|issues?|tickets?)\b.{0,25}\bare\s+unassigned\b',
+            _re_fast.IGNORECASE,
+        ),
+        "assignee is EMPTY AND sprint in openSprints() AND status != Done",
+        "Unassigned issues in the active sprint:\n{results}",
+        25,
+    ),
+]
+
+# Priority-filter fast paths (one per priority level)
+# Pattern uses s? so both "blocker" and "blockers" match.
+for _pri in ("Blocker", "Critical", "High", "Medium", "Low"):
+    _FAST_JIRA_DIRECT.append((
+        _re_fast.compile(
+            rf'\b(show|list|display|are\s+there)\b.{{0,25}}\b{_pri.lower()}s?\b.{{0,25}}\b(tickets?|issues?|tasks?|priority)?\b',
+            _re_fast.IGNORECASE,
+        ),
+        f"priority = {_pri} AND status != Done ORDER BY updated DESC",
+        f"{_pri} open issues:\n{{results}}",
+        25,
+    ))
+
+# Status-filter fast paths
+_STATUS_MAP = {
+    "in progress": "In Progress",
+    "in review": "In Review",
+    "to do": "To Do",
+    "done": "Done",
+    "testing": "Testing",
+    "backlog": "Backlog",
+}
+for _slug, _jira_status in _STATUS_MAP.items():
+    _FAST_JIRA_DIRECT.append((
+        _re_fast.compile(
+            rf'\b(show|list|display|what)\b.{{0,20}}\b({_slug.replace(" ", r"[- ]")})\b.{{0,20}}\b(tickets?|issues?|tasks?)?\b',
+            _re_fast.IGNORECASE,
+        ),
+        f'status = "{_jira_status}" AND sprint in openSprints() ORDER BY updated DESC',
+        f"{_jira_status} issues:\n{{results}}",
+        25,
+    ))
+
+
+def _fast_jira_plan(task: str) -> list | None:
+    """Return a pre-built 2-step plan for simple Jira queries, bypassing the LLM.
+
+    Returns None if the task doesn't match a known fast-path pattern,
+    in which case the caller should fall through to the full planner.
+    """
+    for pattern, jql, response_tmpl, limit in _FAST_JIRA_DIRECT:
+        if pattern.search(task):
+            logger.info("[PLANNER] Fast-path match for Jira query: %s", pattern.pattern[:60])
+            return [
+                {
+                    "id": "jira_q",
+                    "tool": "jira_search",
+                    "description": f"Search Jira: {jql[:80]}",
+                    "params": {"jql": jql, "limit": limit},
+                    "success_criteria": "Issues retrieved",
+                },
+                {
+                    "id": "show",
+                    "tool": "direct_response",
+                    "description": "Present results",
+                    "params": {"message": "{{jira_q}}"},
+                    "success_criteria": "Results shown",
+                },
+            ]
+    return None
+
+
 async def planner_node(state: AgentState) -> dict:
     """Generate a plan from the task. Runs ONCE at the start."""
     from dqe_agent.llm import get_planner_llm
@@ -1294,6 +1570,24 @@ async def planner_node(state: AgentState) -> dict:
         return {"status": "failed", "error": "No task provided to planner"}
 
     logger.info("[PLANNER] Planning task: %s", task[:100])
+
+    # ── Fast path: bypass LLM for simple Jira queries ────────────────────────
+    fast_plan = _fast_jira_plan(task)
+    if fast_plan:
+        logger.info("[PLANNER] Fast-path plan returned (%d steps)", len(fast_plan))
+        cost = COST_PER_CALL["planner"]
+        return {
+            "plan": fast_plan,
+            "current_step_index": 0,
+            "status": "executing",
+            "retry_count": 0,
+            "replan_count": state.get("replan_count", 0),
+            "steps_taken": state.get("steps_taken", 0),
+            "estimated_cost": state.get("estimated_cost", 0.0),  # no LLM cost
+            "step_results": [],
+            "flow_data": {},
+            "messages": [AIMessage(content=f"Plan created with {len(fast_plan)} steps. Starting execution...")],
+        }
 
     llm = get_planner_llm()
 
@@ -1518,5 +1812,9 @@ async def planner_node(state: AgentState) -> dict:
         "replan_count": state.get("replan_count", 0),
         "steps_taken": state.get("steps_taken", 0),
         "estimated_cost": state.get("estimated_cost", 0.0) + cost,
+        # Reset per-task context so stale step results / flow_data from a previous
+        # plan don't bleed into this one (e.g. board_id skipping the selection step).
+        "step_results": [],
+        "flow_data": {},
         "messages": [AIMessage(content=f"Plan created with {len(plan)} steps. Starting execution...")],
     }

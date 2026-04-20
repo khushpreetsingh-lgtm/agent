@@ -51,12 +51,18 @@ class MasterAgent:
         return self._graph
 
     async def reset(self, thread_id: str = "default") -> None:
-        """Clear memory — closes and reopens the checkpoint DB."""
+        """Clear checkpoint rows for a specific thread without touching other sessions."""
         logger.info("Reset thread: %s", thread_id)
         if self._aio_conn:
-            await self._aio_conn.close()
-        self._aio_conn = await aiosqlite.connect(str(_CHECKPOINT_DB))
-        new_cp = AsyncSqliteSaver(self._aio_conn)
-        await new_cp.setup()
-        self.checkpointer = new_cp
-        self._graph = None  # force rebuild on next use
+            try:
+                # Delete only this thread's rows — other sessions are unaffected.
+                await self._aio_conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,)
+                )
+                await self._aio_conn.execute(
+                    "DELETE FROM checkpoint_writes WHERE thread_id = ?", (thread_id,)
+                )
+                await self._aio_conn.commit()
+                logger.info("Cleared checkpoints for thread %s", thread_id)
+            except Exception as exc:
+                logger.warning("Could not clear checkpoints for thread %s: %s", thread_id, exc)
