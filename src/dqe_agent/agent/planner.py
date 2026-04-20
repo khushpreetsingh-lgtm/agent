@@ -328,6 +328,7 @@ def _parse_jira_projects(result_raw: Any, result_str: str) -> list[dict]:
                 item.get("name") or item.get("projectName") or
                 item.get("displayName") or key
             )
+            # Ensure value is JUST the key, label is for display
             options.append({"value": key, "label": f"{key} — {name}"})
 
     elif isinstance(data, dict):
@@ -461,6 +462,8 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
     • Otherwise → fetch with jira_get_all_projects (or equivalent) → request_selection.
     • The value MUST be a short ALL-UPPERCASE key like FLAG, DEV, PROJ.
       Never pass a UUID, numeric ID, or lowercase string as project_key.
+      NEVER use a sentence or the task description as a project_key.
+      If unknown, call `jira_search_projects` or `request_selection` first.
 
   issue_type:
     • User said "task" / "bug" / "story" / "epic" / "subtask" → hardcode it. No fetch, no ask.
@@ -895,15 +898,15 @@ Params: to (required), subject (required), body (required)
 Ask for any of these if not given. user_google_email is auto-injected.
   {"id":"send","tool":"send_gmail_message","params":{"to":"alice@example.com","subject":"Hello","body":"Hi there"}}
 
-── SEARCH EMAILS (search_gmail_messages) ──
-Params: query (Gmail search syntax e.g. "from:boss@co.com", "subject:invoice", "is:unread")
-Returns PLAIN TEXT with message IDs and snippets.
   {"id":"search","tool":"search_gmail_messages","params":{"query":"is:unread"}}
+  (Wait: search_gmail_messages DOES NOT support 'limit' or 'max_results'. Never pass those.)
 
 ── COUNT / SUMMARIZE EMAILS ──
-If the user asks "how many unread emails" or wants a summary of them, execute the search and then summarize the result using direct_response.
-  [{"id":"search","tool":"search_gmail_messages","params":{"query":"is:unread"}},
-   {"id":"show","tool":"direct_response","params":{"message":"Here is a summary of your unread emails:\n{{search}}"}}]
+If the user asks "how many", "what is the count", or "total number" of emails, ALWAYS use `get_total_unread_emails`.
+  [{"id":"count","tool":"get_total_unread_emails","params":{},"success_criteria":"Count retrieved"},
+   {"id":"show","tool":"direct_response","params":{"message":"{{count}}"}}]
+
+If you need metrics for specific labels (SPAM, TRASH, etc.), use `get_label_metrics(labels=["SPAM", "INBOX"])`.
 
 ── READ EMAIL (get_gmail_message_content) ──
 Params: message_id (from search result)
@@ -912,6 +915,13 @@ Workflow: search → ask_user which message → get content
   {"id":"ask_id","tool":"ask_user","params":{"question":"Which message would you like to read? Here are the results:\n{{search}}"}},
   {"id":"read","tool":"get_gmail_message_content","params":{"message_id":"{{ask_id.answer}}"}},
   {"id":"show","tool":"direct_response","params":{"message":"Email content:\n{{read}}"}}
+
+── BATCH ACTIONS (Mark as Read / Delete / Archive) ──
+CRITICAL: NEVER use `search_gmail_messages` to fetch IDs for batch actions (it returns plain text).
+- For SPECIFIC messages: First use `list_unread_message_ids` (limit 500) then `batch_modify_gmail_message_labels`.
+- For ALL / EVERYTHING / ENTIRE INBOX: Use `batch_apply_labels_to_all` directly. It handles thousands of messages automatically.
+  [{"id":"bulk","tool":"batch_apply_labels_to_all","params":{"query":"is:unread","remove_label_ids":["UNREAD"]}},
+   {"id":"done","tool":"direct_response","params":{"message":"All unread emails have been processed (even thousands)."}}]
 
 ── REPLY TO EMAIL ──
 Use send_gmail_message with thread_id to reply within a thread.

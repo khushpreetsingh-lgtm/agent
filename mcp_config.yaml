@@ -34,3 +34,13 @@ servers:
         GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_CLIENT_ID}
         GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
         USER_GOOGLE_EMAIL: ${USER_GOOGLE_EMAIL}
+
+  - name: gmail-addon
+    enabled: true
+    transport: stdio
+    config:
+      command: python
+      args: ["gmail_addon_mcp.py"]
+      env:
+        GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+        GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}

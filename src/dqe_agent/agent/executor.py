@@ -644,23 +644,37 @@ def _strip_invalid_params(tool_name: str, params: dict) -> dict:
         return params
     if tool_obj is None:
         return params
+    
+    # HARDCODED FIXES for known persistent hallucinations
+    if tool_name == "search_gmail_messages":
+        # search_gmail_messages ONLY supports 'query'
+        if "limit" in params:
+            logger.warning("[EXECUTOR] Stripping persistent hallucinated 'limit' from search_gmail_messages")
+            params = {k: v for k, v in params.items() if k != "limit"}
+
     try:
-        schema = (
-            tool_obj.args_schema.model_json_schema()
-            if hasattr(tool_obj, "args_schema") and tool_obj.args_schema
-            else {}
-        )
-        valid = set(schema.get("properties", {}).keys()) - {"ctx", "kwargs"}
+        schema = {}
+        if hasattr(tool_obj, "args_schema") and tool_obj.args_schema:
+            schema = tool_obj.args_schema.model_json_schema()
+        elif hasattr(tool_obj, "args") and isinstance(tool_obj.args, dict):
+            schema = {"properties": tool_obj.args}
+
+        props = schema.get("properties", {})
+        valid = set(props.keys()) - {"ctx", "kwargs"}
+        
         if not valid:
+            # If no properties found but schema exists, check if it's a root type (rare)
             return params
+
         invalid = [k for k in params if k not in valid]
         if invalid:
             logger.warning(
-                "[EXECUTOR] '%s': stripping unknown params %s (not in schema)",
-                tool_name, invalid,
+                "[EXECUTOR] '%s': stripping unknown params %s (valid keys: %s)",
+                tool_name, invalid, list(valid),
             )
             params = {k: v for k, v in params.items() if k in valid}
-    except Exception:
+    except Exception as e:
+        logger.debug("[EXECUTOR] _strip_invalid_params failed for %s: %s", tool_name, e)
         pass
     return params
 
@@ -727,6 +741,21 @@ def _pre_strip_remap(tool_name: str, params: dict) -> dict:
         for alias in ("issue_id", "id", "ticket_id", "ticket"):
             if alias in params and "issue_key" not in params:
                 params["issue_key"] = params.pop(alias)
+                break
+
+    # ── batch_modify_gmail_message_labels: fix synonyms ─────────────────────
+    if tool_name == "batch_modify_gmail_message_labels":
+        for alias in ("ids", "id_list"):
+            if alias in params and "message_ids" not in params:
+                params["message_ids"] = params.pop(alias)
+                break
+        for alias in ("remove_labels", "removeLabelIds", "labels_to_remove"):
+            if alias in params and "remove_label_ids" not in params:
+                params["remove_label_ids"] = params.pop(alias)
+                break
+        for alias in ("add_labels", "addLabelIds", "labels_to_add"):
+            if alias in params and "add_label_ids" not in params:
+                params["add_label_ids"] = params.pop(alias)
                 break
 
     return params
@@ -896,14 +925,22 @@ def _normalize_tool_params(
 
         # Valid Jira project key: 2-10 uppercase letters/digits, no hyphens (not a UUID)
         import re as _re
-        _key_pat = _re.compile(r'^[A-Z][A-Z0-9]{1,9}$')
-        if not _key_pat.match(params.get("project_key", "")):
+        _key_pat = _re.compile(r'\b([A-Z][A-Z0-9]{1,9})\b')  # Look for a key anywhere in the string
+        
+        orig_key = params.get("project_key", "")
+        match_orig = _key_pat.search(orig_key.strip().upper()) if isinstance(orig_key, str) else None
+        
+        if match_orig:
+            # Successfully extracted a key from the provided string (handles "KEY - Name" cases)
+            params["project_key"] = match_orig.group(1)
+        else:
             # Scan step results for a valid key — prefer steps named "select*" or "project*"
             # Also check the "selected" field (from request_selection JSON result)
+            _strict_pat = _re.compile(r'^[A-Z][A-Z0-9]{1,9}$')
             recovered = _find_selected_value(
                 results_by_id, flow_data,
                 priority_words=["select", "project", "key"],
-                validate=lambda v: bool(_key_pat.match(v.strip().upper())),
+                validate=lambda v: bool(_strict_pat.match(v.strip().upper())),
                 transform=lambda v: v.strip().upper(),
             )
             if recovered:
@@ -912,7 +949,7 @@ def _normalize_tool_params(
             else:
                 logger.warning(
                     "[EXECUTOR] jira_create_issue: project_key=%r is invalid and could not be recovered",
-                    params.get("project_key"),
+                    orig_key,
                 )
 
         # ── issue_type ────────────────────────────────────────────────────
