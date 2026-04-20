@@ -1507,6 +1507,13 @@ def _resolve_template(template: str, flow_data: dict, results_by_id: dict) -> st
                     return json.dumps(items, indent=2, ensure_ascii=False)
                 return json.dumps(r, indent=2, ensure_ascii=False) if r else match.group(0)
             elif isinstance(r, list):
+                # If sub-path requested (e.g. {{find.accountId}}) and result is a list of dicts,
+                # pull the field from the first element — common for jira_search_users results.
+                if len(parts) > 1:
+                    field = parts[-1]
+                    for item in r:
+                        if isinstance(item, dict) and field in item:
+                            return str(item[field])
                 return json.dumps(r, indent=2, ensure_ascii=False)
             elif isinstance(r, str) and r:
                 # Plain text result — sub-path not applicable, return the text directly

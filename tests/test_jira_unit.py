@@ -1,12 +1,13 @@
-"""Unit tests for Jira agent pure-Python helpers — no API calls, no browser.
+"""Unit tests for Jira + Gmail agent pure-Python helpers — no API calls, no browser.
 
-These tests cover the parts of JIRA_TEST_PLAN.md that require zero human
-interaction and zero network calls.  They call the private helpers directly:
+Covers JIRA_TEST_PLAN.md and GMAIL_TEST_PLAN.md sections that require zero
+human interaction and zero network calls.  Calls private helpers directly:
 
-  _fast_jira_plan()         — regex fast-path (Section 1 + 16 phrases)
+  _fast_jira_plan()         — Jira regex fast-path (Sections 1, 15, 16)
+  _fast_gmail_plan()        — Gmail regex fast-path (Sections 1, 11)
   _format_result_for_display()  — result formatting (Section 1 display quality)
-  _no_results_sentence()    — empty-state messages (Section 1.19-1.22)
-  _normalize_tool_params()  — param normalisation (Sections 3-8 param handling)
+  _no_results_sentence()    — empty-state messages
+  _normalize_tool_params()  — param normalisation (Sections 3-8)
 
 Run with:
     pytest tests/test_jira_unit.py -v
@@ -18,7 +19,7 @@ import json
 import pytest
 
 # ── Import helpers under test ────────────────────────────────────────────────
-from dqe_agent.agent.planner import _fast_jira_plan
+from dqe_agent.agent.planner import _fast_jira_plan, _fast_gmail_plan
 from dqe_agent.agent.executor import (
     _format_result_for_display,
     _no_results_sentence,
@@ -667,3 +668,196 @@ class TestEdgeCases:
         """15.14 — 'Fix PROJ-XXX' (invalid key) should not crash."""
         result = _fast_jira_plan("Fix PROJ-XXX")
         assert result is None or isinstance(result, list)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GMAIL FAST-PATH — GMAIL_TEST_PLAN.md Sections 1 & 11
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGmailFastPath:
+    """Gmail fast-path query matching — no API calls needed."""
+
+    # ── Section 1 — Read / Search ────────────────────────────────────────────
+
+    def test_1_1_show_unread_emails(self):
+        """1.1 — 'show my unread emails'"""
+        plan = _fast_gmail_plan("show my unread emails")
+        assert plan is not None
+        assert plan[0]["tool"] == "search_gmail_messages"
+        assert "unread" in plan[0]["params"]["query"]
+
+    def test_1_2_check_my_inbox(self):
+        """1.2 — 'check my inbox'"""
+        plan = _fast_gmail_plan("check my inbox")
+        assert plan is not None
+        assert "inbox" in plan[0]["params"]["query"]
+
+    def test_1_3_any_new_emails(self):
+        """1.3 — 'any new emails?'"""
+        plan = _fast_gmail_plan("any new emails?")
+        assert plan is not None
+        assert plan[0]["tool"] == "search_gmail_messages"
+
+    def test_1_4_any_unread(self):
+        """1.3 variant — 'any unread?'"""
+        plan = _fast_gmail_plan("any unread?")
+        assert plan is not None
+        assert "unread" in plan[0]["params"]["query"]
+
+    def test_1_8_show_starred_emails(self):
+        """1.8 — 'show starred emails'"""
+        plan = _fast_gmail_plan("show starred emails")
+        assert plan is not None
+        assert "starred" in plan[0]["params"]["query"]
+
+    def test_1_9_show_sent_emails(self):
+        """1.9 — 'show sent emails'"""
+        plan = _fast_gmail_plan("show sent emails")
+        assert plan is not None
+        assert "sent" in plan[0]["params"]["query"]
+
+    def test_1_10_show_emails_sent_today(self):
+        """1.10 — 'show emails I sent today'"""
+        plan = _fast_gmail_plan("show emails I sent today")
+        # 'sent' keyword triggers the sent or today fast-path
+        assert plan is None or plan[0]["tool"] == "search_gmail_messages"
+
+    def test_1_12_how_many_unread(self):
+        """1.12 — 'how many unread emails do I have'"""
+        plan = _fast_gmail_plan("how many unread emails do I have")
+        assert plan is not None
+        assert "unread" in plan[0]["params"]["query"]
+
+    def test_1_13_emails_with_attachments(self):
+        """1.13 — 'show emails with attachments'"""
+        plan = _fast_gmail_plan("show emails with attachments")
+        assert plan is not None
+        assert "attachment" in plan[0]["params"]["query"]
+
+    def test_1_14_show_important_emails(self):
+        """1.14 — 'show important emails'"""
+        plan = _fast_gmail_plan("show important emails")
+        assert plan is not None
+        assert "important" in plan[0]["params"]["query"]
+
+    def test_1_15_show_spam(self):
+        """1.15 — 'show emails in spam'"""
+        plan = _fast_gmail_plan("show emails in spam")
+        assert plan is not None
+        assert "spam" in plan[0]["params"]["query"]
+
+    def test_whats_in_my_inbox(self):
+        """Natural variant — 'what's in my inbox'"""
+        plan = _fast_gmail_plan("what's in my inbox")
+        assert plan is not None
+        assert "inbox" in plan[0]["params"]["query"]
+
+    # ── Plan structure ────────────────────────────────────────────────────────
+
+    def test_plan_has_two_steps(self):
+        """All Gmail fast-path plans must be exactly 2 steps."""
+        for phrase in ["show my unread emails", "check my inbox", "show starred emails"]:
+            plan = _fast_gmail_plan(phrase)
+            assert plan is not None, f"Expected fast plan for: {phrase!r}"
+            assert len(plan) == 2, f"Expected 2 steps for: {phrase!r}"
+
+    def test_step_1_is_search_gmail(self):
+        """Step 1 must always be search_gmail_messages."""
+        plan = _fast_gmail_plan("show my unread emails")
+        assert plan is not None
+        assert plan[0]["tool"] == "search_gmail_messages"
+
+    def test_step_2_is_direct_response(self):
+        """Step 2 must always be direct_response with {{gmail_q}} template."""
+        plan = _fast_gmail_plan("show my unread emails")
+        assert plan is not None
+        assert plan[1]["tool"] == "direct_response"
+        assert "{{gmail_q}}" in plan[1]["params"]["message"]
+
+    # ── Must NOT fast-path (go to LLM) ───────────────────────────────────────
+
+    def test_send_email_not_fast_pathed(self):
+        """'send an email' is an action — must NOT hit Gmail fast path."""
+        plan = _fast_gmail_plan("send an email to alice@example.com")
+        assert plan is None
+
+    def test_reply_not_fast_pathed(self):
+        """'reply to Alice' is an action — must NOT hit Gmail fast path."""
+        plan = _fast_gmail_plan("reply to Alice's email")
+        assert plan is None
+
+    def test_forward_not_fast_pathed(self):
+        """'forward an email' is an action — must NOT hit Gmail fast path."""
+        plan = _fast_gmail_plan("forward the email to Bob")
+        assert plan is None
+
+    def test_draft_not_fast_pathed(self):
+        """'draft an email' is an action — must NOT hit Gmail fast path."""
+        plan = _fast_gmail_plan("draft an email to alice@example.com")
+        assert plan is None
+
+    def test_specific_sender_not_fast_pathed(self):
+        """'emails from Alice' has a specific sender — needs LLM to build the right query."""
+        plan = _fast_gmail_plan("show emails from alice@example.com")
+        assert plan is None
+
+    def test_subject_search_not_fast_pathed(self):
+        """'emails about project' has a subject — needs LLM."""
+        plan = _fast_gmail_plan("find emails about the project update")
+        assert plan is None
+
+    def test_non_email_phrase_returns_none(self):
+        """Non-email phrases must not match Gmail fast path."""
+        assert _fast_gmail_plan("create a Jira ticket") is None
+        assert _fast_gmail_plan("open Chrome") is None
+        assert _fast_gmail_plan("show my issues") is None
+
+    # ── Section 10 — must not ask for user's own email ───────────────────────
+
+    def test_10_4_no_own_email_in_fast_plan(self):
+        """Fast-path plans must never ask for user_google_email (it's auto-injected)."""
+        plan = _fast_gmail_plan("show my unread emails")
+        assert plan is not None
+        for step in plan:
+            params_str = json.dumps(step.get("params", {}))
+            assert "user_google_email" not in params_str, (
+                "Fast-path plan should not include user_google_email param — it's auto-injected"
+            )
+
+    # ── Section 11 — natural phrasing ────────────────────────────────────────
+
+    def test_11_1_any_unread_variant(self):
+        """11.1 — 'any unread?' natural phrasing"""
+        plan = _fast_gmail_plan("any unread?")
+        assert plan is not None
+
+    def test_11_2_whats_in_inbox(self):
+        """11.2 — 'what's in my inbox'"""
+        plan = _fast_gmail_plan("what's in my inbox")
+        assert plan is not None
+
+    def test_11_5_drop_message_not_fast_pathed(self):
+        """11.5 — 'drop Alice a message' is an action — must go to LLM."""
+        plan = _fast_gmail_plan("drop Alice a message saying I'll be late")
+        assert plan is None
+
+    def test_11_10_let_alice_know_not_fast_pathed(self):
+        """11.10 — 'let Alice know' is a send action — must go to LLM."""
+        plan = _fast_gmail_plan("let Alice know the project is done")
+        assert plan is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Gmail + Jira cross-check: fast-path routes are mutually exclusive
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestFastPathIsolation:
+    """Jira phrases don't hit Gmail fast-path and vice versa."""
+
+    def test_jira_phrase_not_in_gmail_path(self):
+        for phrase in ["show my issues", "list my tickets", "show blocker issues"]:
+            assert _fast_gmail_plan(phrase) is None, f"Gmail fast-path wrongly matched: {phrase!r}"
+
+    def test_gmail_phrase_not_in_jira_path(self):
+        for phrase in ["show my unread emails", "check my inbox", "show starred emails"]:
+            assert _fast_jira_plan(phrase) is None, f"Jira fast-path wrongly matched: {phrase!r}"

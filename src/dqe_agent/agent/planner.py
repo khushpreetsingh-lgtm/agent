@@ -369,6 +369,12 @@ CRITICAL OUTPUT RULES:
 5. Max 25 steps. Merge trivial adjacent actions where safe.
 6. NEVER invent IDs, values, names, or keys the user did not explicitly provide.
 7. Greetings / status queries → one direct_response step only.
+8. ⚑ DO NOT ASK FOR INFORMATION ALREADY IN THE MESSAGE.
+   If the task contains a Jira project key (e.g. "in FLAG", "for FLAG", "FLAG project"),
+   use it directly — skip any project selection or ask_user step.
+   Same rule applies to: issue key, sprint name, assignee, priority, status, comment text,
+   time duration, issue type, board name. Extract from the message first.
+   Only ask / show selection when the value is genuinely absent.
 
 ═══════════════════════════════════════════════════════════════════
 TOOLS
@@ -410,10 +416,17 @@ TOOLS
 SELECTION RULE — applies to every tool, every domain
 ═══════════════════════════════════════════════════════════════════
 
-Whenever a field requires choosing from a finite set of valid system values
-(project key, sprint, board, assignee, issue type, status, priority, epic, etc.)
-ALWAYS follow this pattern — no exceptions:
+EXCEPTION FIRST — skip the selection flow entirely when the value is already in the task:
+  • "Create a sprint in FLAG"         → project_key = "FLAG", skip project selection
+  • "Create a bug in MA"              → project_key = "MA", skip project selection
+  • "Move FLAG-42 to done"            → issue_key = "FLAG-42", skip ask_user
+  • "Assign FLAG-42 to Hrithik"       → issue_key and assignee both known, skip both asks
+  • "Log 3 hours on FLAG-42"          → issue_key and duration known, skip both asks
+  • "Add sprint named Q3 Sprint 1"    → sprint_name known, skip ask_user for name
+  • "Set FLAG-42 priority to high"    → key and priority known, skip both asks
+  Extract the value from the message and use it directly in the step params.
 
+Only when the value is genuinely absent:
   STEP A  Call the appropriate MCP tool to fetch the valid options list.
   STEP B  Present with request_selection — user clicks a button, no typing needed.
   STEP C  Use {{stepB_id.selected}} in the next step's params.
@@ -469,17 +482,23 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
 
 ── CREATE SPRINT ──
 
-  Required: board_id (from board selection), sprint_name (from ask_user).
+  Required: board_id (from board selection), sprint_name (from ask_user or task).
   Boards MUST be fetched per-project using jira_get_agile_boards(project_key=...).
   The executor pre-resolves the board list into request_selection options automatically.
+  start_date / end_date are auto-filled by executor — NEVER ask the user for them.
 
-  Full sequence:
+  CASE A — project key IS in the task (e.g. "Create a sprint in FLAG"):
+    1. jira_get_agile_boards   — project_key: "FLAG"                     → board list
+    2. request_selection       — board (options: "{{get_boards}}") → {{sel_board.selected}}
+    3. ask_user                — "What should the new sprint be named?"  → {{ask_name.answer}}
+    4. jira_create_sprint      — board_id: {{sel_board.selected}}, name: {{ask_name.answer}}
+
+  CASE B — project key NOT in task (e.g. "Create a sprint"):
     1. request_selection       — project (JIRA_PROJECTS_PREFETCHED)    → {{sel_proj.selected}}
     2. jira_get_agile_boards   — project_key: {{sel_proj.selected}}     → board list
-    3. request_selection       — board (options: "{{get_boards.boards}}") → {{sel_board.selected}}
+    3. request_selection       — board (options: "{{get_boards}}") → {{sel_board.selected}}
     4. ask_user                — "What should the new sprint be named?"  → {{ask_name.answer}}
     5. jira_create_sprint      — board_id: {{sel_board.selected}}, name: {{ask_name.answer}}
-       (start_date / end_date are auto-filled by executor — do NOT ask the user for them)
 
 ── SEARCH / QUERY (jira_search) ──
   Tool: jira_search  (NOT jira_search_issues)
@@ -529,32 +548,59 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
     {"id":"done","tool":"direct_response","params":{"message":"Issue updated: {{upd}}"}}
   ]
 
-  Workflow for "update issue priority":
+  Workflow for "set FLAG-42 priority to high" (both given — skip all asks):
   [
-    {"id":"ask_key","tool":"ask_user","params":{"question":"Which issue key?"}},
-    {"id":"sel_pri","tool":"request_selection","params":{"question":"Select new priority:","options":["Highest","High","Medium","Low","Lowest"],"multi_select":false}},
-    {"id":"upd","tool":"jira_update_issue","params":{"issue_key":"{{ask_key.answer}}","fields":{"priority":{"name":"{{sel_pri.selected}}"}}}},
-    {"id":"done","tool":"direct_response","params":{"message":"Priority updated: {{upd}}"}}
+    {"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"priority":{"name":"High"}}},"success_criteria":"Priority updated"},
+    {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 priority set to High."}}
   ]
 
-  If task already contains the issue key (e.g. "update FLAG-42"), skip the ask_user step.
+  Workflow for "set priority to high" (no issue key — ask first):
+  [
+    {"id":"ask_key","tool":"ask_user","params":{"question":"Which issue key? (e.g. FLAG-42)"}},
+    {"id":"upd","tool":"jira_update_issue","params":{"issue_key":"{{ask_key.answer}}","fields":{"priority":{"name":"High"}}},"success_criteria":"Priority updated"},
+    {"id":"done","tool":"direct_response","params":{"message":"Priority set to High on {{ask_key.answer}}."}}
+  ]
 
-── EXAMPLE: create a Jira task (projects pre-fetched) ──
+  Workflow for "change the priority of FLAG-42" (key given, priority unknown — show selection):
+  [
+    {"id":"sel_pri","tool":"request_selection","params":{"question":"Select new priority:","options":["Blocker","Critical","High","Medium","Low"],"multi_select":false}},
+    {"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"priority":{"name":"{{sel_pri.selected}}"}}},"success_criteria":"Priority updated"},
+    {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 priority updated to {{sel_pri.selected}}."}}
+  ]
+
+── EXAMPLE: "Create a bug in FLAG for the login crash" (project key given — 2 steps) ──
 [
-  {"id": "sel_proj", "type": "select", "description": "Pick Jira project", "tool": "request_selection",
-   "params": {"question": "Which Jira project?", "options": <<JIRA_PROJECTS_PREFETCHED>>, "multi_select": false},
-   "success_criteria": "Project selected"},
-  {"id": "create", "type": "api", "description": "Create the Jira task", "tool": "jira_create_issue",
-   "params": {"project_key": "{{sel_proj.selected}}", "issue_type": "Task", "summary": "Describe task here"},
-   "success_criteria": "Issue created successfully"}
+  {"id": "create", "tool": "jira_create_issue",
+   "params": {"project_key": "FLAG", "issue_type": "Bug", "summary": "Login crash"},
+   "success_criteria": "Issue created successfully"},
+  {"id": "done", "tool": "direct_response", "params": {"message": "Bug created: {{create.key}}"}}
 ]
 
-── EXAMPLE: create a Jira sprint ──
+── EXAMPLE: "Create a new task" (no project given — ask first) ──
+[
+  {"id": "sel_proj", "tool": "request_selection",
+   "params": {"question": "Which Jira project?", "options": <<JIRA_PROJECTS_PREFETCHED>>, "multi_select": false},
+   "success_criteria": "Project selected"},
+  {"id": "create", "tool": "jira_create_issue",
+   "params": {"project_key": "{{sel_proj.selected}}", "issue_type": "Task", "summary": "Describe task here"},
+   "success_criteria": "Issue created successfully"},
+  {"id": "done", "tool": "direct_response", "params": {"message": "Task created: {{create.key}}"}}
+]
+
+── EXAMPLE A: "Create a new sprint in FLAG" (project key given — 4 steps) ──
+[
+  {"id": "get_boards", "tool": "jira_get_agile_boards", "params": {"project_key": "FLAG"}, "success_criteria": "Boards listed"},
+  {"id": "sel_board", "tool": "request_selection", "params": {"question": "Which board?", "options": "{{get_boards}}", "multi_select": false}, "success_criteria": "Board selected"},
+  {"id": "ask_name", "tool": "ask_user", "params": {"question": "What should the new sprint be named?"}, "success_criteria": "Sprint name provided"},
+  {"id": "create_sprint", "tool": "jira_create_sprint", "params": {"board_id": "{{sel_board.selected}}", "name": "{{ask_name.answer}}"}, "success_criteria": "Sprint created"}
+]
+
+── EXAMPLE B: "Create a sprint" (no project — 5 steps) ──
 [
   {"id": "sel_proj", "tool": "request_selection", "params": {"question": "Which Jira project?", "options": "<<JIRA_PROJECTS_PREFETCHED>>", "multi_select": false}, "success_criteria": "Project selected"},
   {"id": "get_boards", "tool": "jira_get_agile_boards", "params": {"project_key": "{{sel_proj.selected}}"}, "success_criteria": "Boards listed"},
-  {"id": "sel_board", "tool": "request_selection", "params": {"question": "Which board?", "options": "{{get_boards.boards}}", "multi_select": false}, "success_criteria": "Board selected"},
-  {"id": "ask_name", "tool": "ask_user", "params": {"question": "Sprint name?"}, "success_criteria": "Sprint name provided"},
+  {"id": "sel_board", "tool": "request_selection", "params": {"question": "Which board?", "options": "{{get_boards}}", "multi_select": false}, "success_criteria": "Board selected"},
+  {"id": "ask_name", "tool": "ask_user", "params": {"question": "What should the new sprint be named?"}, "success_criteria": "Sprint name provided"},
   {"id": "create_sprint", "tool": "jira_create_sprint", "params": {"board_id": "{{sel_board.selected}}", "name": "{{ask_name.answer}}"}, "success_criteria": "Sprint created"}
 ]
 Note: start_date and end_date are auto-filled by the executor. Do NOT ask for them.
@@ -627,10 +673,19 @@ Note: start_date and end_date are auto-filled by the executor. Do NOT ask for th
   [{"id":"s","tool":"jira_search","params":{"jql":"priority = Critical AND status != Done","limit":25},"success_criteria":"Issues listed"},
    {"id":"r","tool":"direct_response","params":{"message":"Critical open issues:\n{{s}}"}}]
 
-  Assignee workload ("what is Tom working on?"):
-  [{"id":"find","tool":"jira_search_users","params":{"query":"Tom"},"success_criteria":"User found"},
-   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{find.accountId}}\" AND status != Done","limit":15},"success_criteria":"Issues listed"},
+  Assignee workload ("what is Tom working on?" / "show Hrithik's tasks" / "check tasks of Alice"):
+  RULE: NEVER use assignee = "display name" directly — Jira Cloud requires an account ID.
+        ALWAYS call jira_search_users first to resolve the name to an account ID, then use it in JQL.
+
+  [{"id":"find","tool":"jira_search_users","params":{"query":"Tom"},"success_criteria":"User account found"},
+   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{find.accountId}}\" AND status != Done ORDER BY updated DESC","limit":15},"success_criteria":"Issues listed"},
    {"id":"r","tool":"direct_response","params":{"message":"Tom's open issues:\n{{s}}"}}]
+
+  If jira_search_users returns multiple users → add request_selection step before jira_search:
+  [{"id":"find","tool":"jira_search_users","params":{"query":"Hrithik"}},
+   {"id":"pick","tool":"request_selection","params":{"question":"Which Hrithik?","options":"{{find}}"}},
+   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND status != Done","limit":15}},
+   {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s open issues:\n{{s}}"}}]
 
   Sprint days remaining ("how many days left in sprint?"):
   [{"id":"sp","tool":"jira_get_active_sprints","params":{},"success_criteria":"Sprint info returned"},
@@ -654,9 +709,15 @@ Note: start_date and end_date are auto-filled by the executor. Do NOT ask for th
   time_spent format: "3h" not "3 hours". Executor auto-converts plain English to Jira format.
   If issue_key not in task → ask_user.
   If hours not in task → ask_user ("How many hours? e.g. 2h, 30m, 1.5h").
+  If BOTH are in task → skip all ask_user steps, go straight to jira_add_worklog.
 
+  Example "Log 3 hours on FLAG-42" (both given — 2 steps):
+  [{"id":"log","tool":"jira_add_worklog","params":{"issue_key":"FLAG-42","time_spent":"3 hours"},"success_criteria":"Time logged"},
+   {"id":"done","tool":"direct_response","params":{"message":"Logged 3h on FLAG-42."}}]
+
+  Example "Log time on FLAG-42" (hours missing — ask):
   [{"id":"ask_h","tool":"ask_user","params":{"question":"How many hours to log? (e.g. 2h, 30m, 1.5h)"}},
-   {"id":"log","tool":"jira_add_worklog","params":{"issue_key":"FLAG-42","time_spent":"{{ask_h.answer}}","comment":"API implementation"},"success_criteria":"Time logged"},
+   {"id":"log","tool":"jira_add_worklog","params":{"issue_key":"FLAG-42","time_spent":"{{ask_h.answer}}"},"success_criteria":"Time logged"},
    {"id":"done","tool":"direct_response","params":{"message":"Logged {{ask_h.answer}} on FLAG-42."}}]
 
 ── LINK ISSUES (jira_create_issue_link) ──
@@ -1456,10 +1517,20 @@ _FAST_JIRA_DIRECT: list[tuple] = [
         "Your open issues:\n{results}",
         25,
     ),
-    # "show/list my tickets/issues"
+    # "show/list/give me my tickets/issues" — all "my X" phrasings
     (
         _re_fast.compile(
-            r'\b(show|list|display|view)\b.{0,15}\bmy\b.{0,15}\b(tickets?|issues?|tasks?)\b',
+            r'\b(show|list|display|view|give\s+me|get\s+me|fetch)\b.{0,20}\bmy\b.{0,20}\b(open\s+)?(tickets?|issues?|tasks?)\b',
+            _re_fast.IGNORECASE,
+        ),
+        "assignee = currentUser() AND status != Done ORDER BY updated DESC",
+        "Your open issues:\n{results}",
+        25,
+    ),
+    # "what are my tasks / what's on my plate / what do i have"
+    (
+        _re_fast.compile(
+            r'\b(what\s+(are|is)\s+my|what.{0,10}i\s+(have|need\s+to)|what.{0,10}on\s+my\s+plate)\b.{0,20}\b(tickets?|issues?|tasks?|work|todo)?\b',
             _re_fast.IGNORECASE,
         ),
         "assignee = currentUser() AND status != Done ORDER BY updated DESC",
@@ -1550,6 +1621,144 @@ def _fast_jira_plan(task: str) -> list | None:
     return None
 
 
+# ── Fast-path patterns for common Gmail read queries ─────────────────────────
+# Each entry: (compiled_regex, gmail_query_string, description)
+_FAST_GMAIL_READ: list[tuple] = [
+    # "show my unread emails" / "any new emails?" / "any unread?"
+    (
+        _re_fast.compile(
+            r'\b(show|check|list|any|get|fetch|display)\b.{0,20}\bunread\b.{0,20}\b(emails?|messages?|mail)?\b'
+            r'|\bany\s+(new|unread)\s*(emails?|messages?|mail)?\b'
+            r'|\bunread\b',
+            _re_fast.IGNORECASE,
+        ),
+        "is:unread in:inbox",
+        "Your unread emails",
+    ),
+    # "check my inbox" / "what's in my inbox"
+    (
+        _re_fast.compile(
+            r'\b(check|show|open|view|what.{0,10}in)\b.{0,15}\bmy\b.{0,10}\binbox\b'
+            r'|\bmy\s+inbox\b',
+            _re_fast.IGNORECASE,
+        ),
+        "in:inbox",
+        "Your inbox",
+    ),
+    # "show my sent emails"
+    (
+        _re_fast.compile(
+            r'\b(show|list|display|get)\b.{0,15}\b(my\s+)?(sent|outbox)\b.{0,15}\b(emails?|messages?|mail)?\b',
+            _re_fast.IGNORECASE,
+        ),
+        "in:sent",
+        "Your sent emails",
+    ),
+    # "show starred emails"
+    (
+        _re_fast.compile(
+            r'\b(show|list|display|get)\b.{0,15}\bstarred\b.{0,15}\b(emails?|messages?|mail)?\b',
+            _re_fast.IGNORECASE,
+        ),
+        "is:starred",
+        "Your starred emails",
+    ),
+    # "show important emails"
+    (
+        _re_fast.compile(
+            r'\b(show|list|display|get)\b.{0,15}\bimportant\b.{0,15}\b(emails?|messages?|mail)?\b',
+            _re_fast.IGNORECASE,
+        ),
+        "is:important",
+        "Your important emails",
+    ),
+    # "show emails with attachments"
+    (
+        _re_fast.compile(
+            r'\b(show|list|display|get|find)\b.{0,20}\b(emails?|messages?|mail)\b.{0,20}\battachment(s)?\b'
+            r'|\battachment(s)?\b.{0,20}\b(emails?|messages?|mail)\b',
+            _re_fast.IGNORECASE,
+        ),
+        "has:attachment in:inbox",
+        "Emails with attachments",
+    ),
+    # "how many unread emails do I have"
+    (
+        _re_fast.compile(
+            r'\b(how many|count)\b.{0,20}\bunread\b.{0,20}\b(emails?|messages?|mail)?\b',
+            _re_fast.IGNORECASE,
+        ),
+        "is:unread in:inbox",
+        "Unread email count",
+    ),
+    # "show emails from today" / "show emails I sent today"
+    (
+        _re_fast.compile(
+            r'\b(show|list|get|check)\b.{0,20}\b(emails?|messages?|mail)\b.{0,20}\btoday\b'
+            r'|\btoday.{0,10}\b(emails?|messages?|mail)\b',
+            _re_fast.IGNORECASE,
+        ),
+        "after:today in:inbox",
+        "Today's emails",
+    ),
+    # "show spam" / "show emails in spam"
+    (
+        _re_fast.compile(
+            r'\b(show|list|check)\b.{0,20}\b(in\s+)?(spam|junk)\b',
+            _re_fast.IGNORECASE,
+        ),
+        "in:spam",
+        "Spam folder",
+    ),
+]
+
+
+def _fast_gmail_plan(task: str) -> list | None:
+    """Return a pre-built 2-step plan for simple Gmail read queries, bypassing the LLM.
+
+    Only covers pure read/search operations (Sections 1, partial 11).
+    Send/reply/forward/label flows are too variable — those go to the LLM.
+    Returns None if not a fast-path match.
+    """
+    # Don't fast-path if task mentions a specific sender/subject — those need the LLM
+    # to compose the right query string.
+    _SPECIFIC_PATTERNS = _re_fast.compile(
+        r'\bfrom\b|\bsubject\b|\babout\b|\bregarding\b|\bsent by\b|\bby\b\s+[A-Z]',
+        _re_fast.IGNORECASE,
+    )
+    if _SPECIFIC_PATTERNS.search(task):
+        return None
+
+    # Don't fast-path send/reply/forward/draft actions
+    _ACTION_PATTERNS = _re_fast.compile(
+        r'\b(send|reply|forward|draft|compose|write|respond|email\s+\w+@|ping\b|drop.{0,5}message)\b',
+        _re_fast.IGNORECASE,
+    )
+    if _ACTION_PATTERNS.search(task):
+        return None
+
+    for pattern, gmail_query, description in _FAST_GMAIL_READ:
+        if pattern.search(task):
+            logger.info("[PLANNER] Gmail fast-path match: %s", pattern.pattern[:60])
+            return [
+                {
+                    "id": "gmail_q",
+                    "tool": "search_gmail_messages",
+                    "description": description,
+                    "params": {"query": gmail_query},
+                    "success_criteria": "Emails retrieved",
+                },
+                {
+                    "id": "show",
+                    "tool": "direct_response",
+                    "description": "Present results",
+                    "params": {"message": "{{gmail_q}}"},
+                    "success_criteria": "Results shown",
+                },
+            ]
+    return None
+
+
 async def planner_node(state: AgentState) -> dict:
     """Generate a plan from the task. Runs ONCE at the start."""
     from dqe_agent.llm import get_planner_llm
@@ -1571,8 +1780,8 @@ async def planner_node(state: AgentState) -> dict:
 
     logger.info("[PLANNER] Planning task: %s", task[:100])
 
-    # ── Fast path: bypass LLM for simple Jira queries ────────────────────────
-    fast_plan = _fast_jira_plan(task)
+    # ── Fast path: bypass LLM for simple Jira or Gmail queries ──────────────
+    fast_plan = _fast_jira_plan(task) or _fast_gmail_plan(task)
     if fast_plan:
         logger.info("[PLANNER] Fast-path plan returned (%d steps)", len(fast_plan))
         cost = COST_PER_CALL["planner"]
