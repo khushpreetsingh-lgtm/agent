@@ -32,6 +32,11 @@ _CACHE: dict[str, tuple[float, Any]] = {}   # key -> (fetch_time, data)
 _CACHE_LOCK = asyncio.Lock()
 _CACHE_TTL = 600  # seconds — refresh every 10 minutes
 
+# ── MCP tool description block cache (frozenset of tool names → prebuilt string) ──
+# Building schema for 170 tools on every planner call is expensive (~30s).
+# This cache makes it instant after the first call.
+_MCP_DESC_CACHE: dict[frozenset, str] = {}
+
 
 def _cache_get(key: str) -> Any | None:
     entry = _CACHE.get(key)
@@ -61,6 +66,64 @@ async def warm_cache() -> None:
             logger.warning("[PLANNER] Cache warm: no Jira projects found")
     except Exception as exc:
         logger.warning("[PLANNER] Cache warm-up failed: %s", exc)
+
+
+async def _prewarm_mcp_tool_block() -> None:
+    """Build & cache the MCP tool description block at startup.
+
+    Iterating 170 tools and calling model_json_schema() on each takes ~30s.
+    Running this once at startup means every subsequent planner call gets
+    an instant cache hit instead.
+    """
+    from dqe_agent.tools import list_tool_names, get_tool as _get_tool
+    _browser_tool_set = {
+        "browser_login", "browser_navigate", "browser_act", "browser_extract",
+        "browser_click", "browser_type", "browser_wait", "browser_snapshot",
+        "ask_user", "human_review", "ask_user_choice", "direct_response",
+        "request_selection",
+    }
+    mcp_tools = [t for t in list_tool_names() if t not in _browser_tool_set]
+    if not mcp_tools:
+        logger.warning("[PLANNER] MCP tool block pre-warm: no MCP tools found")
+        return
+    tool_key = frozenset(mcp_tools)
+    if tool_key in _MCP_DESC_CACHE:
+        logger.info("[PLANNER] MCP tool block already cached — skip pre-warm")
+        return
+    _t0 = time.monotonic()
+    mcp_lines = []
+    for t in mcp_tools:
+        try:
+            tool_obj = _get_tool(t)
+            desc = tool_obj.description or ""
+            param_str = ""
+            try:
+                schema = tool_obj.args_schema.model_json_schema() if hasattr(tool_obj, "args_schema") and tool_obj.args_schema else {}
+                props = schema.get("properties", {})
+                required = set(schema.get("required", []))
+                if props:
+                    parts = []
+                    for p, info in props.items():
+                        if p in ("kwargs", "ctx"):
+                            continue
+                        req = "*" if p in required else ""
+                        ptype = info.get("type", info.get("anyOf", [{}])[0].get("type", "any"))
+                        parts.append(f"{p}{req}: {ptype}")
+                    param_str = f"({', '.join(parts)})"
+            except Exception:
+                pass
+            mcp_lines.append(f"  - {t}{param_str}: {desc[:100]}")
+        except Exception:
+            mcp_lines.append(f"  - {t}")
+    mcp_block = (
+        "AVAILABLE_MCP_TOOLS — call these directly as step tools, no browser needed.\n"
+        "Parameters marked * are required. Use ONLY the listed param names — never invent extras like 'ctx', 'priority', 'auth_check'.\n"
+        "{{step_id.field}} templates reference PREVIOUS STEP RESULTS only, never AVAILABLE_MCP_TOOLS itself.\n"
+        + "\n".join(mcp_lines)
+    )
+    _MCP_DESC_CACHE[tool_key] = mcp_block
+    elapsed = (time.monotonic() - _t0) * 1000
+    logger.info("[PLANNER] MCP tool block pre-warmed in %.0fms (%d tools)", elapsed, len(mcp_tools))
 
 
 async def _prefetch_selection_options(task: str, context_parts: list) -> None:
@@ -482,29 +545,66 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
    "params": {"question": "Which Jira project?", "options": <<JIRA_PROJECTS_PREFETCHED>>, "multi_select": false},
    "success_criteria": "Project selected"},
   {"id": "create", "type": "api", "description": "Create the Jira task", "tool": "jira_create_issue",
-   "params": {"project_key": "{{sel_proj.selected}}", "issue_type": "Task", "summary": "Bug in login page"},
-   "success_criteria": "Issue created successfully"}
-]
+   "params": {"project_key": "{{sel_proj.selected}}", "issue_type": "Task", "summary": "Describe task here"},
+   "success_criteria": "Issue created successfully"}
+]
+
+── EXAMPLE: create a Jira sprint ──
+[
+  {"id": "sel_proj", "tool": "request_selection", "params": {"question": "Which Jira project?", "options": "<<JIRA_PROJECTS_PREFETCHED>>", "multi_select": false}, "success_criteria": "Project selected"},
+  {"id": "get_boards", "tool": "jira_get_agile_boards", "params": {"project_key": "{{sel_proj.selected}}"}, "success_criteria": "Boards listed"},
+  {"id": "sel_board", "tool": "request_selection", "params": {"question": "Which board?", "options": "{{get_boards.boards}}", "multi_select": false}, "success_criteria": "Board selected"},
+  {"id": "ask_name", "tool": "ask_user", "params": {"question": "Sprint name?"}, "success_criteria": "Sprint name provided"},
+  {"id": "create_sprint", "tool": "jira_create_sprint", "params": {"board_id": "{{sel_board.selected}}", "name": "{{ask_name.answer}}"}, "success_criteria": "Sprint created"}
+]
+Note: start_date and end_date are auto-filled by the executor. Do NOT ask for them.
+
 
-── EXAMPLE: create a Jira sprint ──
-[
-  {"id": "sel_proj", "type": "select", "description": "Pick Jira project", "tool": "request_selection",
-   "params": {"question": "Which Jira project?", "options": <<JIRA_PROJECTS_PREFETCHED>>, "multi_select": false},
-   "success_criteria": "Project selected"},
-  {"id": "get_boards", "type": "api", "description": "Fetch boards for the selected project", "tool": "jira_get_agile_boards",
-   "params": {"project_key": "{{sel_proj.selected}}"},
-   "success_criteria": "Boards listed"},
-  {"id": "sel_board", "type": "select", "description": "Pick board for the sprint", "tool": "request_selection",
-   "params": {"question": "Which board should the sprint be created in?", "options": "{{get_boards.boards}}", "multi_select": false},
-   "success_criteria": "Board selected"},
-  {"id": "ask_name", "type": "ask", "description": "Ask for the sprint name", "tool": "ask_user",
-   "params": {"question": "What should the new sprint be named?"},
-   "success_criteria": "Sprint name provided"},
-  {"id": "create_sprint", "type": "api", "description": "Create the sprint", "tool": "jira_create_sprint",
-   "params": {"board_id": "{{sel_board.selected}}", "name": "{{ask_name.answer}}"},
-   "success_criteria": "Sprint created successfully"}
-]
-Note: start_date and end_date are auto-filled by the executor (today → today+14 days). Do NOT ask the user for them.
+⛔ NEVER pass jira_get_transitions result directly as transition_id (it's a list, not a string).
+
+  Required params for jira_transition_issue:
+    issue_key     (string, e.g. "FLAG-42")
+    transition_id (string — a SINGLE numeric ID like "31", NOT a list)
+
+  DECISION TREE — follow this exactly:
+
+  A) MULTIPLE issues in context AND user didn't specify which ones
+     → request_selection(multi_select=true) to let user pick which issues to act on FIRST.
+     Then loop the transition steps for each selected issue.
+
+  B) TARGET STATUS already known from user message ("mark as Done", "close", "complete")
+     → jira_get_transitions(issue_key=...) → jira_transition_issue(transition_id="{{get_tr}}")
+     The executor auto-extracts the matching ID by name. SKIP request_selection for status.
+
+  C) TARGET STATUS is ambiguous (user just said "update status" / "change state")
+     → jira_get_transitions → request_selection for status → jira_transition_issue
+
+  EXAMPLE A — "mark them as done" (multiple open tasks returned from previous step):
+  [
+    {"id":"sel_issues","tool":"request_selection",
+     "params":{"question":"Which tasks should I mark as Done?",
+               "options":"{{search_tasks}}","multi_select":true},
+     "success_criteria":"Issues selected"},
+    {"id":"get_tr_1","tool":"jira_get_transitions","params":{"issue_key":"FLAG-33"},"success_criteria":"Transitions fetched"},
+    {"id":"tr_1","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{get_tr_1}}"},"success_criteria":"FLAG-33 marked Done"},
+    {"id":"get_tr_2","tool":"jira_get_transitions","params":{"issue_key":"FLAG-32"},"success_criteria":"Transitions fetched"},
+    {"id":"tr_2","tool":"jira_transition_issue","params":{"issue_key":"FLAG-32","transition_id":"{{get_tr_2}}"},"success_criteria":"FLAG-32 marked Done"}
+  ]
+  Note: passing {{get_tr_N}} directly — the executor finds and extracts the "Done" ID automatically.
+
+  EXAMPLE B — "mark FLAG-33 as Done" (single issue, status known):
+  [
+    {"id":"get_tr","tool":"jira_get_transitions","params":{"issue_key":"FLAG-33"},"success_criteria":"Transitions listed"},
+    {"id":"do_tr","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{get_tr}}"},"success_criteria":"Done"}
+  ]
+
+  EXAMPLE C — "change the status of FLAG-33" (ambiguous — ask):
+  [
+    {"id":"get_tr","tool":"jira_get_transitions","params":{"issue_key":"FLAG-33"},"success_criteria":"Transitions listed"},
+    {"id":"sel_tr","tool":"request_selection","params":{"question":"Which status?","options":"{{get_tr}}","multi_select":false},"success_criteria":"Status selected"},
+    {"id":"do_tr","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{sel_tr.selected}}"},"success_criteria":"Done"}
+  ]
+
 
 ═══════════════════════════════════════════════════════════════════
 GOOGLE CALENDAR
@@ -531,19 +631,36 @@ CORRECT param names:
   action="create", summary (title), start_time (RFC3339), end_time (RFC3339),
   calendar_id="primary", attendees (list of emails or plain string — executor auto-parses)
 
-ALWAYS ask for missing info:
-  • summary — ask if not given in task
-  • attendees — ALWAYS ask who to invite (may be solo or group)
+⚠️  CONFLICT CHECK IS MANDATORY before creating any meeting.
+  Always call query_freebusy for the requested time window FIRST.
+  If the slot is busy, use human_review to warn the user and ask if they want to proceed anyway.
+  Only create the meeting after the user confirms.
 
-Example plan for "create a meeting today at 2pm":
+ALWAYS ask for missing info (BEFORE the freebusy check):
+  • summary — ask if not given in task
+  • start_time — ask if not given, then convert to RFC3339 (e.g. "today at 2pm" → "<today>T08:30:00Z")
+  • attendees — ALWAYS ask who to invite (may be solo or group)
+  • duration — ask if not given
+
+MANDATORY plan template for "create a meeting":
 [
   {"id":"ask_title","tool":"ask_user","params":{"question":"What should the meeting be called?"}},
   {"id":"ask_attendees","tool":"ask_user","params":{"question":"Who would you like to invite? (emails, or 'just me')"}},
-  {"id":"ask_duration","tool":"ask_user","params":{"question":"How long should the meeting be (e.g. '30 minutes', '1 hour')?"}},
-  {"id":"create_evt","tool":"manage_event","params":{"action":"create","summary":"{{ask_title.answer}}","start_time":"<today>T14:00:00Z","duration":"{{ask_duration.answer}}","attendees":"{{ask_attendees.answer}}","calendar_id":"primary"}},
-  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting created: {{create_evt}}"}}
+  {"id":"ask_duration","tool":"ask_user","params":{"question":"How long? (e.g. '30 minutes', '1 hour')"}},
+  {"id":"check_busy","tool":"query_freebusy","params":{"time_min":"<start_time>","time_max":"<end_time>"},
+   "success_criteria":"Freebusy checked"},
+  {"id":"conflict_gate","tool":"human_review","params":{"question":"⚠️ You have a conflict at this time:\n{{check_busy}}\n\nDo you still want to create the meeting?"},
+   "condition":"{{check_busy}} contains busy period",
+   "success_criteria":"User confirmed or slot is free — skip this step if no conflict"},
+  {"id":"create_evt","tool":"manage_event","params":{"action":"create","summary":"{{ask_title.answer}}","start_time":"<start_time>","duration":"{{ask_duration.answer}}","attendees":"{{ask_attendees.answer}}","calendar_id":"primary"}},
+  {"id":"confirm","tool":"direct_response","params":{"message":"✅ Meeting created: {{create_evt}}"}}
 ]
-If task has a clear title AND attendees already, skip the ask_user steps.
+
+IMPORTANT:
+- If query_freebusy returns NO busy periods overlapping the requested slot → skip human_review, proceed directly to manage_event.
+- If there IS a conflict → show human_review with the conflict details. Only proceed if user says yes.
+- If the task already contains title AND attendees, skip those ask_user steps.
+
 
 ── UPDATE / DELETE MEETING (manage_event) ──
 To update or delete, you need the event_id. Workflow:
@@ -1213,39 +1330,49 @@ async def planner_node(state: AgentState) -> dict:
         )
     mcp_tools = [t for t in list_tool_names() if t not in _browser_tool_set]
     if mcp_tools:
-        from dqe_agent.tools import get_tool as _get_tool
-        mcp_lines = []
-        for t in mcp_tools:
-            try:
-                tool_obj = _get_tool(t)
-                desc = tool_obj.description or ""
-                # Include exact parameter schema so planner doesn't guess wrong param names
-                param_str = ""
+        # ── Fast path: serve cached tool description block ───────────────────
+        _tool_key = frozenset(mcp_tools)
+        cached_mcp_block = _MCP_DESC_CACHE.get(_tool_key)
+        if cached_mcp_block:
+            context_parts.append(cached_mcp_block)
+        else:
+            # ── Slow path: build schema for all MCP tools (runs once) ────────
+            _t0 = time.monotonic()
+            from dqe_agent.tools import get_tool as _get_tool
+            mcp_lines = []
+            for t in mcp_tools:
                 try:
-                    schema = tool_obj.args_schema.model_json_schema() if hasattr(tool_obj, "args_schema") and tool_obj.args_schema else {}
-                    props = schema.get("properties", {})
-                    required = set(schema.get("required", []))
-                    if props:
-                        parts = []
-                        for p, info in props.items():
-                            # Skip MCP-internal params injected by the framework — callers must not pass them
-                            if p in ("kwargs", "ctx"):
-                                continue
-                            req = "*" if p in required else ""
-                            ptype = info.get("type", info.get("anyOf", [{}])[0].get("type", "any"))
-                            parts.append(f"{p}{req}: {ptype}")
-                        param_str = f"({', '.join(parts)})"
+                    tool_obj = _get_tool(t)
+                    desc = tool_obj.description or ""
+                    param_str = ""
+                    try:
+                        schema = tool_obj.args_schema.model_json_schema() if hasattr(tool_obj, "args_schema") and tool_obj.args_schema else {}
+                        props = schema.get("properties", {})
+                        required = set(schema.get("required", []))
+                        if props:
+                            parts = []
+                            for p, info in props.items():
+                                if p in ("kwargs", "ctx"):
+                                    continue
+                                req = "*" if p in required else ""
+                                ptype = info.get("type", info.get("anyOf", [{}])[0].get("type", "any"))
+                                parts.append(f"{p}{req}: {ptype}")
+                            param_str = f"({', '.join(parts)})"
+                    except Exception:
+                        pass
+                    mcp_lines.append(f"  - {t}{param_str}: {desc[:100]}")
                 except Exception:
-                    pass
-                mcp_lines.append(f"  - {t}{param_str}: {desc[:100]}")
-            except Exception:
-                mcp_lines.append(f"  - {t}")
-        context_parts.append(
-            "AVAILABLE_MCP_TOOLS — call these directly as step tools, no browser needed.\n"
-            "Parameters marked * are required. Use ONLY the listed param names — never invent extras like 'ctx', 'priority', 'auth_check'.\n"
-            "{{step_id.field}} templates reference PREVIOUS STEP RESULTS only, never AVAILABLE_MCP_TOOLS itself.\n"
-            + "\n".join(mcp_lines)
-        )
+                    mcp_lines.append(f"  - {t}")
+            mcp_block = (
+                "AVAILABLE_MCP_TOOLS — call these directly as step tools, no browser needed.\n"
+                "Parameters marked * are required. Use ONLY the listed param names — never invent extras like 'ctx', 'priority', 'auth_check'.\n"
+                "{{step_id.field}} templates reference PREVIOUS STEP RESULTS only, never AVAILABLE_MCP_TOOLS itself.\n"
+                + "\n".join(mcp_lines)
+            )
+            _MCP_DESC_CACHE[_tool_key] = mcp_block
+            logger.info("[PLANNER] MCP tool block built in %.0fms and cached (%d tools)",
+                        (time.monotonic() - _t0) * 1000, len(mcp_tools))
+            context_parts.append(mcp_block)
     else:
         context_parts.append("AVAILABLE_MCP_TOOLS: (none loaded yet)")
 
@@ -1280,10 +1407,44 @@ async def planner_node(state: AgentState) -> dict:
         system_prompt = MASTER_SYSTEM_PROMPT + BROWSER_SYSTEM_PROMPT
 
     start = time.time()
-    response = await llm.ainvoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=user_msg),
-    ])
+
+    # ── Build multi-turn history so the LLM is aware of prior conversation ──
+    # state["messages"] accumulates all turns via LangGraph add_messages reducer.
+    # We include the last N exchanges (excluding the very latest user msg which
+    # is already encoded in the TASK context_part above).
+    _MAX_HISTORY_TURNS = 10  # configurable — covers ~5 Q&A exchanges
+    raw_messages = state.get("messages", [])
+    history_msgs: list = []
+
+    # Collect prior turns (skip the last user message — already in TASK)
+    prior = raw_messages[:-1] if raw_messages else []
+    # Take last _MAX_HISTORY_TURNS messages for context window efficiency
+    prior = prior[-_MAX_HISTORY_TURNS:]
+
+    for m in prior:
+        if hasattr(m, "type"):
+            if m.type == "human":
+                history_msgs.append(HumanMessage(content=str(m.content)[:800]))
+            elif m.type == "ai":
+                # Summarise AI planning output as brief assistant context
+                content = str(m.content)
+                # Trim very long plan confirmations
+                history_msgs.append(AIMessage(content=content[:400]))
+        elif isinstance(m, tuple) and len(m) == 2:
+            role, content = m
+            if role == "user":
+                history_msgs.append(HumanMessage(content=str(content)[:800]))
+            elif role == "assistant":
+                history_msgs.append(AIMessage(content=str(content)[:400]))
+
+    if history_msgs:
+        logger.debug("[PLANNER] Injecting %d prior context messages into LLM call", len(history_msgs))
+
+    # Final message list: system → history → current task
+    llm_messages = [SystemMessage(content=system_prompt)] + history_msgs + [HumanMessage(content=user_msg)]
+
+    response = await llm.ainvoke(llm_messages)
+
     duration = (time.time() - start) * 1000
 
     # Parse plan JSON from response

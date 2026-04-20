@@ -816,6 +816,59 @@ def _normalize_tool_params(
         if not params.get("fields"):
             params["fields"] = "{}"  # tool requires fields even if empty
 
+    # ── jira_get_transitions + jira_transition_issue: coerce list params to str ─
+    if tool_name in ("jira_transition_issue", "transition_issue",
+                     "jira_get_transitions", "get_transitions"):
+
+        # issue_key might be a multi-select result list: [{'selected': 'FLAG-33', ...}]
+        ikey = params.get("issue_key")
+        if isinstance(ikey, list):
+            # Extract string from first element's 'selected' or 'answer' field
+            extracted_key = ""
+            for item in ikey:
+                if isinstance(item, dict):
+                    extracted_key = str(item.get("selected") or item.get("answer") or item.get("key") or "").strip()
+                elif isinstance(item, str):
+                    extracted_key = item.strip()
+                if extracted_key:
+                    break
+            if extracted_key:
+                logger.info(
+                    "[EXECUTOR] %s: extracted issue_key=%r from multi-select list (%d items)",
+                    tool_name, extracted_key, len(ikey),
+                )
+                params["issue_key"] = extracted_key
+            else:
+                logger.warning("[EXECUTOR] %s: could not extract issue_key from list: %s", tool_name, ikey)
+
+        # transition_id coercion — only for transition_issue
+        if tool_name in ("jira_transition_issue", "transition_issue"):
+            tid = params.get("transition_id")
+            if isinstance(tid, list):
+                # Planner passed the full transitions list instead of a single ID string.
+                # Auto-pick by matching "done/close/resolve" names, else first item.
+                _DONE_NAMES = {"done", "closed", "close", "complete", "completed",
+                               "resolve", "resolved", "finish", "finished"}
+                matched_id = None
+                for entry in tid:
+                    if isinstance(entry, dict):
+                        name = str(entry.get("name", "")).lower()
+                        if any(d in name for d in _DONE_NAMES):
+                            matched_id = str(entry.get("id", ""))
+                            break
+                if not matched_id and tid and isinstance(tid[0], dict):
+                    matched_id = str(tid[0].get("id", ""))
+                if matched_id:
+                    logger.info(
+                        "[EXECUTOR] jira_transition_issue: auto-extracted transition_id=%r from %d-item list",
+                        matched_id, len(tid),
+                    )
+                    params["transition_id"] = matched_id
+                else:
+                    logger.warning("[EXECUTOR] jira_transition_issue: could not extract id from list: %s", tid)
+            elif isinstance(tid, (int, float)):
+                params["transition_id"] = str(int(tid))
+
     # ── Gmail tools: auto-inject user_google_email ───────────────────────────
     _GMAIL_TOOLS = {
         "send_gmail_message", "search_gmail_messages", "get_gmail_message_content",
@@ -832,6 +885,7 @@ def _normalize_tool_params(
                 logger.info("[EXECUTOR] %s: injected user_google_email from settings", tool_name)
 
     return params
+
 
 
 def _find_selected_value(

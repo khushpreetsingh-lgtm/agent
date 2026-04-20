@@ -157,10 +157,15 @@ async def lifespan(app: FastAPI):
     from dqe_agent.tools.mcp_startup import load_mcp_servers
     await load_mcp_servers()
 
-    # Pre-warm common data caches (Jira projects, etc.) in the background
-    # so the first task doesn't pay the fetch latency.
-    from dqe_agent.agent.planner import warm_cache
-    asyncio.create_task(warm_cache())
+    # ── Pre-warm ALL caches so the FIRST request is just as fast as subsequent ──
+    # 1. Jira projects (used by planner for project selection)
+    from dqe_agent.agent.planner import warm_cache, _prewarm_mcp_tool_block
+    logger.info("Pre-warming Jira project cache...")
+    await warm_cache()
+
+    # 2. MCP tool description block (the ~30s schema-build loop for 170 tools)
+    logger.info("Pre-warming MCP tool schema block...")
+    await _prewarm_mcp_tool_block()
 
     # Start browser (skip when browser tools are disabled)
     browser_manager = BrowserManager()
