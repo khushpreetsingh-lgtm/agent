@@ -454,34 +454,52 @@ Use MCP tools from AVAILABLE_MCP_TOOLS. Do NOT use browser_* tools for Jira.
 Verifier note: Jira steps are verified by response content only — no screenshot.
 Use plain success_criteria like "Issue created successfully" or "Projects listed".
 
-── CREATE ISSUE — full drill-down sequence ──
+── CREATE ISSUE — MANDATORY step order (ALWAYS follow this — no exceptions) ──
 
-  project_key (always required):
-    • If JIRA_PROJECTS_PREFETCHED is in context → use those options directly in request_selection.
-      Do NOT call any project listing tool again.
-    • Otherwise → fetch with jira_get_all_projects (or equivalent) → request_selection.
-    • The value MUST be a short ALL-UPPERCASE key like FLAG, DEV, PROJ.
-      Never pass a UUID, numeric ID, or lowercase string as project_key.
-      NEVER use a sentence or the task description as a project_key.
-      If unknown, call `jira_search_projects` or `request_selection` first.
+⛔ NEVER skip or reorder these phases. NEVER use request_selection alone for project — it must be
+   part of a request_form that also collects summary and priority in ONE interaction.
 
-  issue_type:
-    • User said "task" / "bug" / "story" / "epic" / "subtask" → hardcode it. No fetch, no ask.
-    • Ambiguous → fetch with jira_get_issue_types or jira_get_project → request_selection.
-    • Default: "Task" when no listing tool exists.
+  PHASE 1 — Fetch priorities first (no user interaction):
+    jira_get_priorities()  → needed for the form's priority dropdown
 
-  summary:
-    • Extract from user message if present. ask_user only if completely absent.
+  PHASE 2 — Collect ALL missing info in ONE request_form:
+    Fields to include (skip only if the exact value was given in the current message):
+      • project   — select, options from JIRA_PROJECTS list
+      • summary   — text, required (SHORT issue title — 1 line. "about X" or topic in message
+                    is desc_topic NOT summary — ALWAYS ask for summary separately)
+      • issue_type— select (Task/Bug/Story/Epic) — skip if stated explicitly
+      • priority  — select, options: "{{get_pri}}" — ALWAYS collect unless user named exact priority
+      • desc_topic— textarea, optional (what the description should cover)
+    ⚑ Batch ALL missing fields into ONE form — never use separate request_selection for project alone.
+    ⚑ summary is ALWAYS required in the form unless the user wrote a complete title (not just a topic).
+    ⚑ priority is ALWAYS required unless user stated an exact priority name that matches the list.
 
-  Optional drill-down (include when user requests or context requires):
-    • Sprint    → fetch sprints for the board → request_selection
-    • Assignee  → fetch project members → request_selection
-    • Priority  → request_selection with options: Highest, High, Medium, Low, Lowest
-    • Epic      → fetch epics in the project → request_selection
-    • Board     → fetch with jira_get_agile_boards(project_key=...) → request_selection
-    • Transitions/Status → fetch available transitions → request_selection
+  PHASE 3 — Assignee (choose ONE case based on CURRENT message only):
+    CASE A — "for me" / "assign to me"    → skip; hardcode {"accountId":"me"} in PHASE 6
+    CASE B — name given ("for hrithik")   → skip; executor resolves name→accountId in PHASE 6
+             ⛔ CASE B applies ONLY when the name appears in the CURRENT message. Never from history.
+    CASE C — no assignee mentioned        → jira_get_assignable_users(project_key={{form.project}})
+                                            → request_selection(options:"{{fetch_users}}")
 
-  Final step: jira_create_issue(project_key*, issue_type*, summary*, [sprint_id, assignee_id, ...])
+  PHASE 4 — Generate description (AFTER all fields confirmed):
+    llm_draft_content(content_type="issue_description", topic={{form.desc_topic or message topic}},
+                      context="{{form.issue_type}} in {{form.project}}: {{form.summary}}, priority {{form.priority}}")
+
+  PHASE 5 — Let user review/edit the description:
+    request_edit(label="Issue Description", content={{gen_desc.content}})
+
+  PHASE 6 — Create + update:
+    jira_create_issue(project_key={{form.project}}, issue_type={{form.issue_type}},
+                      summary={{form.summary}}, description={{edit_desc.content}})
+    jira_update_issue(issue_key={{create}}, fields={priority:{name:{{form.priority}}}, assignee:{...}})
+
+  project_key rules:
+    • MUST be a short ALL-UPPERCASE key like FLAG, DEV, PROJ.
+    • NEVER pass a UUID, numeric ID, lowercase string, or sentence as project_key.
+
+  issue_type rules:
+    • "task"/"bug"/"story"/"epic"/"subtask" stated by user → hardcode it.
+    • Default: "Task" when ambiguous.
 
 ── CREATE SPRINT ──
 
@@ -537,10 +555,11 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
     issue_key  (required — e.g. "FLAG-42") — ask_user if not in task
     fields     (required — JSON string of fields to update)
 
-  IMPORTANT: fields MUST be a JSON string, e.g. '{"summary": "New title"}'
-  Executor auto-converts a dict to JSON string — you may pass a dict in the plan.
+  IMPORTANT: fields must be a dict/object (NOT a JSON string). The executor passes it directly to Jira.
+  For assignee, always use {"accountId": "<id>"} — never {"name": "..."} (Jira Cloud requires accountId).
+  Executor resolves the accountId automatically from the display name when needed.
 
-  Common field names: summary, description, priority ({"name":"High"}), assignee ({"name":"user"}),
+  Common field names: summary, description, priority ({"name":"High"}), assignee ({"accountId":"..."}),
                       status (use jira_transition_issue for status changes)
 
   Workflow for "update issue title":
@@ -571,24 +590,8 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
     {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 priority updated to {{sel_pri.selected}}."}}
   ]
 
-── EXAMPLE: "Create a bug in FLAG for the login crash" (project key given — 2 steps) ──
-[
-  {"id": "create", "tool": "jira_create_issue",
-   "params": {"project_key": "FLAG", "issue_type": "Bug", "summary": "Login crash"},
-   "success_criteria": "Issue created successfully"},
-  {"id": "done", "tool": "direct_response", "params": {"message": "Bug created: {{create.key}}"}}
-]
-
-── EXAMPLE: "Create a new task" (no project given — ask first) ──
-[
-  {"id": "sel_proj", "tool": "request_selection",
-   "params": {"question": "Which Jira project?", "options": <<JIRA_PROJECTS_PREFETCHED>>, "multi_select": false},
-   "success_criteria": "Project selected"},
-  {"id": "create", "tool": "jira_create_issue",
-   "params": {"project_key": "{{sel_proj.selected}}", "issue_type": "Task", "summary": "Describe task here"},
-   "success_criteria": "Issue created successfully"},
-  {"id": "done", "tool": "direct_response", "params": {"message": "Task created: {{create.key}}"}}
-]
+⛔ For CREATE ISSUE user flows, ALWAYS follow PHASE 1-6 below — never skip the form or priority fetch.
+   The full PHASE-compliant examples are in the CREATE ISSUE section further below.
 
 ── EXAMPLE A: "Create a new sprint in FLAG" (project key given — 4 steps) ──
 [
