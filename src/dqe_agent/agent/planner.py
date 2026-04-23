@@ -219,14 +219,14 @@ def _inject_jira_projects(options: list, context_parts: list) -> None:
     """Append pre-fetched project data into the planner context."""
     options_json = json.dumps(options, indent=2)
     context_parts.append(
-        "JIRA_PROJECTS_PREFETCHED — use these directly in request_selection, "
-        "do NOT call any project listing tool again:\n"
+        "JIRA_PROJECTS_PREFETCHED — use these directly when the project is unknown.\n"
+        "DO NOT call any project listing tool again.\n"
         f"{options_json}\n\n"
-        "For the project selection step use:\n"
-        '  tool: "request_selection"\n'
-        '  params: {"question": "Which Jira project should this be created in?", '
-        '"options": <copy the array above exactly>, "multi_select": false}\n'
-        "Reference the result as {{select_project.selected}} in jira_create_issue params."
+        "When project IS already known from the task: scan the list above to find the matching\n"
+        "  'value' key (e.g. user says 'insuretech' → find label containing 'insuretech' → use its 'value').\n"
+        "  Use that value directly in jira_get_assignable_users and jira_create_issue.\n"
+        "When project is NOT known: use request_selection with id='sel_proj' and\n"
+        "  options=<<JIRA_PROJECTS_PREFETCHED>>. Reference result as {{sel_proj.selected}}."
     )
 
 
@@ -360,8 +360,9 @@ def _parse_jira_projects(result_raw: Any, result_str: str) -> list[dict]:
             pass
 
     if isinstance(data, list):
-        for item in data:
+        for idx, item in enumerate(data):
             if not isinstance(item, dict):
+                logger.debug("[PLANNER] Project item %d is not a dict: %s", idx, item)
                 continue
             # Try short fields first (most likely to be the real project key)
             # mcp-atlassian may return {key, name, id} or {projectKey, projectName, id}
@@ -379,17 +380,40 @@ def _parse_jira_projects(result_raw: Any, result_str: str) -> list[dict]:
 
             if not key:
                 # Skip — all candidate keys are UUIDs, numeric IDs, or empty
-                logger.debug("[PLANNER] Skipping project item with no valid key: %s", item)
+                logger.debug(
+                    "[PLANNER] Skipping project item %d with no valid key: keys=%s",
+                    idx,
+                    candidate_keys,
+                )
                 continue
 
             name = item.get("name") or item.get("projectName") or item.get("displayName") or key
+            # Heuristic: if the key is just the uppercased name (e.g. key="INSURETECH", name="InsureTech"),
+            # it's likely the server mistakenly used the name as the key. Skip this item.
+            if key.upper() == name.strip().upper():
+                logger.debug(
+                    "[PLANNER] Skipping project item %d where key '%s' equals name '%s'",
+                    idx,
+                    key,
+                    name,
+                )
+                continue
+
             # Ensure value is JUST the key, label is for display
             options.append({"value": key, "label": f"{key} — {name}"})
 
     elif isinstance(data, dict):
         for container_key in ("projects", "values", "items", "data", "results"):
             if container_key in data and isinstance(data[container_key], list):
-                return _parse_jira_projects(data[container_key], "")
+                nested = data[container_key]
+                logger.debug(
+                    "[PLANNER] Found %d projects in container '%s'", len(nested), container_key
+                )
+                # Recurse but avoid infinite loops by passing empty string for result_str
+                return _parse_jira_projects(nested, "")
+        logger.debug(
+            "[PLANNER] No project list container found in dict keys: %s", list(data.keys())
+        )
 
     # ── String fallback: scan for KEY — Name patterns ────────────────────────
     if not options and result_str:
@@ -398,7 +422,10 @@ def _parse_jira_projects(result_raw: Any, result_str: str) -> list[dict]:
             if key not in {o["value"] for o in options}:
                 options.append({"value": key, "label": key})
 
-    return options[:20]
+    logger.debug("[PLANNER] Parsed %d project options total", len(options))
+    # Do NOT arbitrarily truncate — return all discovered projects (up to a safe max).
+    # The UI can scroll; the user needs to find their project. 100 is a reasonable cap.
+    return options[:100]
 
 
 _BROWSER_TASK_KEYWORDS = {
@@ -445,6 +472,11 @@ CRITICAL OUTPUT RULES:
    Same rule applies to: issue key, sprint name, assignee, priority, status, comment text,
    time duration, issue type, board name. Extract from the message first.
    Only ask / show selection when the value is genuinely absent.
+9. ⚑ NEVER ASSUME A DATE OR TIME RANGE.
+   If the user's task does not explicitly mention a date (e.g. "today", "tomorrow", "this week",
+   "last week", "April 20"), you MUST ask_user for the date/range before proceeding.
+   TODAY'S DATE is provided only as a reference — do NOT auto-fill it into queries unless
+   the user's words explicitly include a relative or absolute date reference.
 
 ═══════════════════════════════════════════════════════════════════
 TOOLS
@@ -506,14 +538,14 @@ NEVER use ask_user for system-defined values. NEVER hard-code options you haven'
 NEVER ask the user to type a key, ID, or code that the system can provide as a list.
 
 ⛔ NEVER ASSUME any Jira field. This means:
-  • NEVER assume the project — ALWAYS fetch and present with request_selection.
+  • Project: if stated in task → look up the real key from JIRA_PROJECTS_PREFETCHED and use it directly.
+             if NOT stated → use request_selection with JIRA_PROJECTS_PREFETCHED options.
+             NEVER invent a project key from the user's words without matching it to the cache.
   • NEVER assume the sprint — ALWAYS fetch boards then sprints, present with request_selection.
-  • NEVER assume the assignee — ALWAYS fetch project members and present with request_selection
-    (or ask_user to confirm if no listing tool is available).
+  • NEVER assume the assignee — ALWAYS fetch project members (for the confirmed project) and
+    present with request_selection via the form.
   • NEVER assume the issue type — if not 100% explicit in user message, fetch and ask.
-  • NEVER assume the board — ALWAYS fetch boards for the selected project.
-  Even if the user says "create a task", you MUST still fetch and confirm the project
-  before creating anything. Assume nothing.
+  • NEVER assume the board — ALWAYS fetch boards for the selected/known project.
 
 ═══════════════════════════════════════════════════════════════════
 JIRA / ATLASSIAN
@@ -526,54 +558,66 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
 
 ── CREATE ISSUE — MANDATORY step order (ALWAYS follow this — no exceptions) ──
 
-⛔ NEVER skip or reorder these phases. NEVER use request_selection alone for project — it must be
-   part of a request_form that also collects summary and priority in ONE interaction.
+⚑ KEY RULE — resolve the REAL project key from JIRA_PROJECTS_PREFETCHED BEFORE fetching
+  assignees or creating anything. NEVER use <<FIRST_PROJECT_KEY>>. NEVER guess a key from
+  the user's words alone.
+  When user says "insuretech" → scan JIRA_PROJECTS_PREFETCHED labels → use the matching "value"
+  (e.g. look for "insuretech" in label "NSRTCH — InsureTech" → real key is "NSRTCH").
 
-  PHASE 1 — Fetch data (no user interaction — TWO steps before the form):
-    Step A: jira_get_priorities()           → id: "get_pri"    (needed for priority dropdown)
-    Step B: jira_get_assignable_users()     → id: "fetch_users" (needed for assignee dropdown)
-            project_key: "<<FIRST_PROJECT_KEY>>" — executor resolves this automatically
+⚑ Assignees MUST be fetched AFTER the project key is known — they are project-specific.
 
-  PHASE 2 — Collect ALL info in ONE request_form (NEVER split into multiple interactions):
-    ⚑ ALL of the following go in ONE form — user fills and submits once.
-    ⚑ EVERY field dict MUST include an "id" key — this is how values are referenced later.
-    ⚑ summary is ALWAYS required. "about X" or a topic phrase is NOT a summary — always ask.
-    ⚑ priority is ALWAYS required unless user stated an exact priority name.
-    ⚑ assignee MUST be a select field using {{fetch_users}} — NEVER a text field.
-      ⛔ NEVER use separate jira_get_assignable_users + request_selection steps for assignee.
+CASE A — project IS stated in the task (e.g. "create issue in FLAG", "create bug in insuretech"):
+  • Scan JIRA_PROJECTS_PREFETCHED to find the real key ("value") for the project the user named.
+  • Use that real key throughout — DO NOT put a project selection field in the form.
+  • Replace <REAL_KEY> below with the actual "value" from JIRA_PROJECTS_PREFETCHED.
 
-    EXACT JSON for PHASE 1 + PHASE 2 (copy verbatim — do NOT change ids):
-    {"id":"get_pri","tool":"jira_get_priorities","params":{},"success_criteria":"Priorities fetched"},
-    {"id":"fetch_users","tool":"jira_get_assignable_users","params":{"project_key":"<<FIRST_PROJECT_KEY>>"},"success_criteria":"Users fetched"},
-    {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Task","fields":[
-      {"id":"project","label":"Project","type":"select","required":true,"options":"<<JIRA_PROJECTS_PREFETCHED>>"},
-      {"id":"summary","label":"Task Summary","type":"text","required":true,"placeholder":"Short one-line title"},
-      {"id":"issue_type","label":"Issue Type","type":"select","required":true,"options":[{"value":"Task","label":"Task"},{"value":"Bug","label":"Bug"},{"value":"Story","label":"Story"},{"value":"Epic","label":"Epic"}]},
-      {"id":"priority","label":"Priority","type":"select","required":true,"options":"{{get_pri}}"},
-      {"id":"assignee","label":"Assignee","type":"select","required":false,"options":"{{fetch_users}}"},
-      {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?"}
-    ]},"success_criteria":"All task details collected"}
+  EXACT JSON for CASE A (replace every <REAL_KEY> with the matched project value):
+  {"id":"get_pri","tool":"jira_get_priorities","params":{},"success_criteria":"Priorities fetched"},
+  {"id":"fetch_users","tool":"jira_get_assignable_users","params":{"project_key":"<REAL_KEY>"},"success_criteria":"Users fetched"},
+  {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Task","fields":[
+    {"id":"summary","label":"Task Summary","type":"text","required":true,"placeholder":"Short one-line title"},
+    {"id":"issue_type","label":"Issue Type","type":"select","required":true,"options":[{"value":"Task","label":"Task"},{"value":"Bug","label":"Bug"},{"value":"Story","label":"Story"},{"value":"Epic","label":"Epic"}]},
+    {"id":"priority","label":"Priority","type":"select","required":true,"options":"{{get_pri}}"},
+    {"id":"assignee","label":"Assignee","type":"select","required":false,"options":"{{fetch_users}}"},
+    {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?"}
+  ]},"success_criteria":"All task details collected"},
+  {"id":"gen_desc","tool":"llm_draft_content","params":{"content_type":"issue_description","topic":"{{collect_info.desc_topic}}","context":"{{collect_info.issue_type}} in <REAL_KEY>: {{collect_info.summary}}, priority {{collect_info.priority}}"},"success_criteria":"Description drafted"},
+  {"id":"edit_desc","tool":"request_edit","params":{"label":"Issue Description","content":"{{gen_desc.content}}"},"success_criteria":"Description reviewed"},
+  {"id":"create_issue","tool":"jira_create_issue","params":{"project_key":"<REAL_KEY>","issue_type":"{{collect_info.issue_type}}","summary":"{{collect_info.summary}}","description":"{{edit_desc.content}}"},"success_criteria":"Issue created"},
+  {"id":"upd_issue","tool":"jira_update_issue","params":{"issue_key":"{{create_issue.key}}","fields":{"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"}}}
 
-  PHASE 3 — Generate description (AFTER form submitted):
-    llm_draft_content(content_type="issue_description",
-                      topic="{{collect_info.desc_topic}}",
-                      context="{{collect_info.issue_type}} in {{collect_info.project}}: {{collect_info.summary}}, priority {{collect_info.priority}}")
+CASE B — project NOT stated in the task:
+  First show project selection, then fetch assignees for the CHOSEN project.
 
-  PHASE 4 — Let user review/edit the description:
-    request_edit(label="Issue Description", content="{{gen_desc.content}}")
+  EXACT JSON for CASE B:
+  {"id":"sel_proj","tool":"request_selection","params":{"question":"Which Jira project should this be created in?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
+  {"id":"get_pri","tool":"jira_get_priorities","params":{},"success_criteria":"Priorities fetched"},
+  {"id":"fetch_users","tool":"jira_get_assignable_users","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Users fetched"},
+  {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Task","fields":[
+    {"id":"summary","label":"Task Summary","type":"text","required":true,"placeholder":"Short one-line title"},
+    {"id":"issue_type","label":"Issue Type","type":"select","required":true,"options":[{"value":"Task","label":"Task"},{"value":"Bug","label":"Bug"},{"value":"Story","label":"Story"},{"value":"Epic","label":"Epic"}]},
+    {"id":"priority","label":"Priority","type":"select","required":true,"options":"{{get_pri}}"},
+    {"id":"assignee","label":"Assignee","type":"select","required":false,"options":"{{fetch_users}}"},
+    {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?"}
+  ]},"success_criteria":"All task details collected"},
+  {"id":"gen_desc","tool":"llm_draft_content","params":{"content_type":"issue_description","topic":"{{collect_info.desc_topic}}","context":"{{collect_info.issue_type}} in {{sel_proj.selected}}: {{collect_info.summary}}, priority {{collect_info.priority}}"},"success_criteria":"Description drafted"},
+  {"id":"edit_desc","tool":"request_edit","params":{"label":"Issue Description","content":"{{gen_desc.content}}"},"success_criteria":"Description reviewed"},
+  {"id":"create_issue","tool":"jira_create_issue","params":{"project_key":"{{sel_proj.selected}}","issue_type":"{{collect_info.issue_type}}","summary":"{{collect_info.summary}}","description":"{{edit_desc.content}}"},"success_criteria":"Issue created"},
+  {"id":"upd_issue","tool":"jira_update_issue","params":{"issue_key":"{{create_issue.key}}","fields":{"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"}}}
 
-  PHASE 5 — Create + update:
-    jira_create_issue(project_key="{{collect_info.project}}", issue_type="{{collect_info.issue_type}}",
-                      summary="{{collect_info.summary}}", description="{{edit_desc.content}}")
-    jira_update_issue(issue_key="{{create_issue.key}}", fields={"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"})
+⚑ EVERY field dict MUST include an "id" key.
+⚑ summary is ALWAYS required. "about X" or a topic phrase is NOT a summary — always ask.
+⚑ priority is ALWAYS required unless user stated an exact priority name.
+⚑ assignee MUST be a select field using {{fetch_users}} — NEVER a text field.
 
-  project_key rules:
-    • MUST be a short ALL-UPPERCASE key like FLAG, DEV, PROJ.
-    • NEVER pass a UUID, numeric ID, lowercase string, or sentence as project_key.
+project_key rules:
+  • MUST be a short ALL-UPPERCASE key like FLAG, DEV, PROJ.
+  • NEVER pass a UUID, numeric ID, lowercase string, or sentence as project_key.
+  • ALWAYS use the exact "value" from JIRA_PROJECTS_PREFETCHED — NEVER the "label" or the user's raw words.
 
-  issue_type rules:
-    • "task"/"bug"/"story"/"epic"/"subtask" stated by user → hardcode it.
-    • Default: "Task" when ambiguous.
+issue_type rules:
+  • "task"/"bug"/"story"/"epic"/"subtask" stated by user → hardcode it.
+  • Default: "Task" when ambiguous.
 
 ── CREATE SPRINT ──
 
@@ -582,127 +626,63 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
   The executor pre-resolves the board list into request_selection options automatically.
   start_date / end_date are auto-filled by executor — NEVER ask the user for them.
 
+  ⛔ STEP ORDER IS STRICT — a step that references {{X.selected}} MUST come AFTER the step with id "X".
+     NEVER place jira_get_agile_boards before the project selection step it depends on.
+
   CASE A — project key IS in the task (e.g. "Create a sprint in FLAG"):
-    1. jira_get_agile_boards   — project_key: "FLAG"                     → board list
-    2. request_selection       — board (options: "{{get_boards}}") → {{sel_board.selected}}
-    3. ask_user                — "What should the new sprint be named?"  → {{ask_name.answer}}
-    4. jira_create_sprint      — board_id: {{sel_board.selected}}, name: {{ask_name.answer}}
+    EXACT JSON (copy verbatim — step order must not change):
+    [{"id":"get_boards","tool":"jira_get_agile_boards","params":{"project_key":"FLAG"},"success_criteria":"Boards listed"},
+     {"id":"sel_board","tool":"request_selection","params":{"question":"Which board?","options":"{{get_boards}}","multi_select":false},"success_criteria":"Board selected"},
+     {"id":"sprint_info","tool":"request_form","params":{"title":"New Sprint Details","fields":[
+       {"id":"name","label":"Sprint Name","type":"text","required":true,"placeholder":"e.g. Sprint 5"},
+       {"id":"start_date","label":"Start Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+       {"id":"end_date","label":"End Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+       {"id":"goal","label":"Sprint Goal","type":"textarea","required":false,"placeholder":"What is the goal of this sprint? (optional)"}
+     ]},"success_criteria":"Sprint details collected"},
+     {"id":"cr_sprint","tool":"jira_create_sprint","params":{"board_id":"{{sel_board.selected}}","name":"{{sprint_info.name}}","start_date":"{{sprint_info.start_date}}","end_date":"{{sprint_info.end_date}}","goal":"{{sprint_info.goal}}"},"success_criteria":"Sprint created"},
+     {"id":"done","tool":"direct_response","params":{"message":"Sprint '{{sprint_info.name}}' created successfully."}}]
 
   CASE B — project key NOT in task (e.g. "Create a sprint"):
-    1. request_selection       — project (JIRA_PROJECTS_PREFETCHED)    → {{sel_proj.selected}}
-    2. jira_get_agile_boards   — project_key: {{sel_proj.selected}}     → board list
-    3. request_selection       — board (options: "{{get_boards}}") → {{sel_board.selected}}
-    4. ask_user                — "What should the new sprint be named?"  → {{ask_name.answer}}
-    5. jira_create_sprint      — board_id: {{sel_board.selected}}, name: {{ask_name.answer}}
+    EXACT JSON (sel_proj MUST be first — jira_get_agile_boards MUST be after it):
+    [{"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
+     {"id":"get_boards","tool":"jira_get_agile_boards","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Boards listed"},
+     {"id":"sel_board","tool":"request_selection","params":{"question":"Which board?","options":"{{get_boards}}","multi_select":false},"success_criteria":"Board selected"},
+     {"id":"sprint_info","tool":"request_form","params":{"title":"New Sprint Details","fields":[
+       {"id":"name","label":"Sprint Name","type":"text","required":true,"placeholder":"e.g. Sprint 5"},
+       {"id":"start_date","label":"Start Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+       {"id":"end_date","label":"End Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+       {"id":"goal","label":"Sprint Goal","type":"textarea","required":false,"placeholder":"What is the goal of this sprint? (optional)"}
+     ]},"success_criteria":"Sprint details collected"},
+     {"id":"cr_sprint","tool":"jira_create_sprint","params":{"board_id":"{{sel_board.selected}}","name":"{{sprint_info.name}}","start_date":"{{sprint_info.start_date}}","end_date":"{{sprint_info.end_date}}","goal":"{{sprint_info.goal}}"},"success_criteria":"Sprint created"},
+     {"id":"done","tool":"direct_response","params":{"message":"Sprint '{{sprint_info.name}}' created successfully."}}]
 
-── SEARCH / QUERY (jira_search) ──
-  Tool: jira_search  (NOT jira_search_issues)
-  Params: jql (required — JQL string), limit (optional, default 10)
-  Returns JSON list of issues — use {{step_id}} in direct_response.
+  ⚑ ALWAYS collect start_date, end_date, and goal from the user via the form above.
+     NEVER skip the form or leave date fields empty — the executor no longer auto-fills them.
 
-  Examples:
-    jira_search(jql="project = FLAG AND status = Open")
-    jira_search(jql="assignee = currentUser() ORDER BY created DESC")
-    jira_search(jql="project = DEV AND issuetype = Bug")
+── GET ACTIVE SPRINTS ──
+To retrieve active sprints (e.g. "what is the active sprint for me?"):
+  1. Get boards — jira_get_agile_boards (optionally filter by project_key if known).
+  2. If more than one board, use request_selection so the user picks the relevant board.
+  3. Call jira_get_sprints_from_board with board_id from step 2 and state="active".
+     This returns a list of active sprints.
+  4. If you need issues in the active sprint for the current user, use jira_search:
+       jql="sprint = <sprint_id> AND assignee = currentUser()"
+     Or call jira_get_sprint_issues(sprint_id="<sprint_id>") after selecting a sprint.
 
-  Plan for "show open issues in FLAG":
+  Example — "show active sprints":
   [
-    {"id":"search","tool":"jira_search","params":{"jql":"project = FLAG AND status != Done","limit":10}},
-    {"id":"show","tool":"direct_response","params":{"message":"Open issues in FLAG:\n{{search}}"}}
+    {"id":"boards","tool":"jira_get_agile_boards","params":{},"success_criteria":"Boards retrieved"},
+    {"id":"sel_board","tool":"request_selection","params":{"question":"Which board?","options":"{{boards}}","multi_select":false},"success_criteria":"Board selected"},
+    {"id":"active","tool":"jira_get_sprints_from_board","params":{"board_id":"{{sel_board.selected}}","state":"active"},"success_criteria":"Active sprints loaded"},
+    {"id":"show","tool":"direct_response","params":{"message":"Active sprints:\n{{active}}"}}
   ]
 
-── DELETE ISSUE (jira_delete_issue) ──
-  Tool: jira_delete_issue
-  Params: issue_key* (string, e.g. "FLAG-42")
-  ⛔ ALWAYS ask the user to confirm before deleting — deletion is permanent.
-  ALWAYS search first so the user picks from a real list (never ask for a key by text).
+  ⛔ direct_response for sprints MUST use EXACTLY: "message":"Active sprints:\n{{active}}"
+     Do NOT add sections like "Available Priorities", "Board Info", or any other headers.
+     The sprint tool result already contains all the detail needed — embed it as-is.
 
-   Workflow for "delete some tasks in my project":
-  [
-    {"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false}},
-    {"id":"search","tool":"jira_search","params":{"jql":"project = {{sel_proj.selected}} ORDER BY created DESC","limit":100}},
-    {"id":"sel_issue","tool":"request_selection","params":{"question":"Which issue(s) to delete?","options":"{{search}}","multi_select":true}},
-    {"id":"confirm","tool":"human_review","params":{"review_type":"delete","summary":"Delete issue(s): {{sel_issue.selected}}"}},
-    {"id":"del","tool":"jira_delete_issue","params":{"issue_key":"{{sel_issue.selected}}"}},
-    {"id":"done","tool":"direct_response","params":{"message":"Deleted: {{sel_issue.selected}}"}}
-  ]
+  ⛠ There is NO tool named 'jira_get_active_sprints' — use jira_get_sprints_from_board with state='active'.
 
-  If project key is already known (e.g. user says "delete tasks in FLAG"):
-  Skip sel_proj step, use project key directly in jql.
-
-── GET ISSUE (jira_get_issue) ──
-  Tool: jira_get_issue
-  Params: issue_key (required, e.g. "FLAG-42")
-  Returns JSON with issue details — use {{step_id}} in direct_response.
-
-  • Ask the user for issue_key if not given in the task.
-  Plan for "show details of FLAG-42":
-  [
-    {"id":"get","tool":"jira_get_issue","params":{"issue_key":"FLAG-42"}},
-    {"id":"show","tool":"direct_response","params":{"message":"Issue details:\n{{get}}"}}
-  ]
-
-── UPDATE ISSUE (jira_update_issue) ──
-  Tool: jira_update_issue
-  Params:
-    issue_key  (required — e.g. "FLAG-42") — ask_user if not in task
-    fields     (required — JSON string of fields to update)
-
-  IMPORTANT: fields must be a dict/object (NOT a JSON string). The executor passes it directly to Jira.
-  For assignee, always use {"accountId": "<id>"} — never {"name": "..."} (Jira Cloud requires accountId).
-  Executor resolves the accountId automatically from the display name when needed.
-
-  Common field names: summary, description, priority ({"name":"High"}), assignee ({"accountId":"..."}),
-                      status (use jira_transition_issue for status changes)
-
-  Workflow for "update issue title":
-  [
-    {"id":"ask_key","tool":"ask_user","params":{"question":"What is the Jira issue key to update? (e.g. FLAG-42)"}},
-    {"id":"ask_val","tool":"ask_user","params":{"question":"What should the new title/summary be?"}},
-    {"id":"upd","tool":"jira_update_issue","params":{"issue_key":"{{ask_key.answer}}","fields":{"summary":"{{ask_val.answer}}"}}},
-    {"id":"done","tool":"direct_response","params":{"message":"Issue updated: {{upd}}"}}
-  ]
-
-  Workflow for "set FLAG-42 priority to high" (both given — skip all asks):
-  [
-    {"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"priority":{"name":"High"}}},"success_criteria":"Priority updated"},
-    {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 priority set to High."}}
-  ]
-
-  Workflow for "set priority to high" (no issue key — ask first):
-  [
-    {"id":"ask_key","tool":"ask_user","params":{"question":"Which issue key? (e.g. FLAG-42)"}},
-    {"id":"upd","tool":"jira_update_issue","params":{"issue_key":"{{ask_key.answer}}","fields":{"priority":{"name":"High"}}},"success_criteria":"Priority updated"},
-    {"id":"done","tool":"direct_response","params":{"message":"Priority set to High on {{ask_key.answer}}."}}
-  ]
-
-  Workflow for "change the priority of FLAG-42" (key given, priority unknown — show selection):
-  [
-    {"id":"sel_pri","tool":"request_selection","params":{"question":"Select new priority:","options":["Blocker","Critical","High","Medium","Low"],"multi_select":false}},
-    {"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"priority":{"name":"{{sel_pri.selected}}"}}},"success_criteria":"Priority updated"},
-    {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 priority updated to {{sel_pri.selected}}."}}
-  ]
-
-⛔ For CREATE ISSUE user flows, ALWAYS follow PHASE 1-6 below — never skip the form or priority fetch.
-   The full PHASE-compliant examples are in the CREATE ISSUE section further below.
-
-── EXAMPLE A: "Create a new sprint in FLAG" (project key given — 4 steps) ──
-[
-  {"id": "get_boards", "tool": "jira_get_agile_boards", "params": {"project_key": "FLAG"}, "success_criteria": "Boards listed"},
-  {"id": "sel_board", "tool": "request_selection", "params": {"question": "Which board?", "options": "{{get_boards}}", "multi_select": false}, "success_criteria": "Board selected"},
-  {"id": "ask_name", "tool": "ask_user", "params": {"question": "What should the new sprint be named?"}, "success_criteria": "Sprint name provided"},
-  {"id": "create_sprint", "tool": "jira_create_sprint", "params": {"board_id": "{{sel_board.selected}}", "name": "{{ask_name.answer}}"}, "success_criteria": "Sprint created"}
-]
-
-── EXAMPLE B: "Create a sprint" (no project — 5 steps) ──
-[
-  {"id": "sel_proj", "tool": "request_selection", "params": {"question": "Which Jira project?", "options": "<<JIRA_PROJECTS_PREFETCHED>>", "multi_select": false}, "success_criteria": "Project selected"},
-  {"id": "get_boards", "tool": "jira_get_agile_boards", "params": {"project_key": "{{sel_proj.selected}}"}, "success_criteria": "Boards listed"},
-  {"id": "sel_board", "tool": "request_selection", "params": {"question": "Which board?", "options": "{{get_boards}}", "multi_select": false}, "success_criteria": "Board selected"},
-  {"id": "ask_name", "tool": "ask_user", "params": {"question": "What should the new sprint be named?"}, "success_criteria": "Sprint name provided"},
-  {"id": "create_sprint", "tool": "jira_create_sprint", "params": {"board_id": "{{sel_board.selected}}", "name": "{{ask_name.answer}}"}, "success_criteria": "Sprint created"}
-]
-Note: start_date and end_date are auto-filled by the executor. Do NOT ask for them.
 
 
 ⛔ NEVER pass jira_get_transitions result directly as transition_id (it's a list, not a string).
@@ -763,13 +743,18 @@ Note: start_date and end_date are auto-filled by the executor. Do NOT ask for th
     Blocked:                priority = Blocker AND status != Done
     Done recently:          status = Done AND updated >= -1d
     Combine freely:         assignee = currentUser() AND status = "In Progress"
+    Worklog on a date:      worklogDate = "YYYY-MM-DD" AND worklogAuthor = currentUser()
+
+  ⚑ DATE RULE FOR JQL: NEVER auto-fill a date in worklogDate, created, updated, or any other
+    date field unless the user explicitly stated a date in the task.
+    If no date is given → ask_user("Which date should I check? (e.g. today, April 20, last week)")
 
   Count query ("how many X do I have?"):
   [{"id":"s","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status != Done","limit":1},"success_criteria":"Count returned"},
    {"id":"r","tool":"direct_response","params":{"message":"You have {{s.total}} open issues."}}]
 
   List query ("show all critical issues"):
-  [{"id":"s","tool":"jira_search","params":{"jql":"priority = Critical AND status != Done","limit":25},"success_criteria":"Issues listed"},
+  [{"id":"s","tool":"jira_search","params":{"jql":"priority = Critical AND status != Done","limit":100},"success_criteria":"Issues listed"},
    {"id":"r","tool":"direct_response","params":{"message":"Critical open issues:\n{{s}}"}}]
 
   Assignee workload ("what is Tom working on?" / "show Hrithik's tasks" / "check tasks of Alice"):
@@ -777,13 +762,13 @@ Note: start_date and end_date are auto-filled by the executor. Do NOT ask for th
         ALWAYS call jira_search_users first to resolve the name to an account ID, then use it in JQL.
 
   [{"id":"find","tool":"jira_search_users","params":{"query":"Tom"},"success_criteria":"User account found"},
-   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{find.accountId}}\" AND status != Done ORDER BY updated DESC","limit":15},"success_criteria":"Issues listed"},
+   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{find.accountId}}\" AND status != Done ORDER BY updated DESC","limit":100},"success_criteria":"Issues listed"},
    {"id":"r","tool":"direct_response","params":{"message":"Tom's open issues:\n{{s}}"}}]
 
   If jira_search_users returns multiple users → add request_selection step before jira_search:
   [{"id":"find","tool":"jira_search_users","params":{"query":"Hrithik"}},
    {"id":"pick","tool":"request_selection","params":{"question":"Which Hrithik?","options":"{{find}}"}},
-   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND status != Done","limit":15}},
+   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND status != Done","limit":100}},
    {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s open issues:\n{{s}}"}}]
 
   Sprint days remaining ("how many days left in sprint?"):
@@ -794,11 +779,26 @@ Note: start_date and end_date are auto-filled by the executor. Do NOT ask for th
   Tool: jira_add_comment
   Params: issue_key* (string, e.g. "FLAG-42"), comment* (string — the text to add)
 
-  If issue_key not in task → ask_user.
-  If comment text not in task → ask_user.
-  If issue_key IS in task and comment IS in task (after colon, or in quotes) → skip ask_user steps.
+  If BOTH issue_key AND comment are in task → go straight to jira_add_comment (no form).
+  If EITHER is missing → collect ALL missing fields at once with request_form. NEVER use sequential ask_user.
 
+  Example "Add comment 'Ready for QA review' to FLAG-42" (both given):
   [{"id":"add","tool":"jira_add_comment","params":{"issue_key":"FLAG-42","comment":"Ready for QA review"},"success_criteria":"Comment added"},
+   {"id":"done","tool":"direct_response","params":{"message":"Comment added to FLAG-42."}}]
+
+  Example "Add a comment" (BOTH missing — collect via form):
+  [{"id":"collect","tool":"request_form","params":{"title":"Add Jira Comment","fields":[
+      {"id":"issue_key","label":"Issue Key","type":"text","required":true,"placeholder":"e.g. FLAG-42"},
+      {"id":"comment","label":"Comment","type":"text","required":true,"placeholder":"Your comment text"}
+    ]},"success_criteria":"Details collected"},
+   {"id":"add","tool":"jira_add_comment","params":{"issue_key":"{{collect.issue_key}}","comment":"{{collect.comment}}"},"success_criteria":"Comment added"},
+   {"id":"done","tool":"direct_response","params":{"message":"Comment added to {{collect.issue_key}}."}}]
+
+  Example "Add a comment to FLAG-42" (issue_key given, comment missing — form with only comment field):
+  [{"id":"collect","tool":"request_form","params":{"title":"Add Comment to FLAG-42","fields":[
+      {"id":"comment","label":"Comment","type":"text","required":true,"placeholder":"Your comment text"}
+    ]},"success_criteria":"Comment text collected"},
+   {"id":"add","tool":"jira_add_comment","params":{"issue_key":"FLAG-42","comment":"{{collect.comment}}"},"success_criteria":"Comment added"},
    {"id":"done","tool":"direct_response","params":{"message":"Comment added to FLAG-42."}}]
 
 ── LOG TIME / WORKLOG (jira_add_worklog) ──
@@ -806,18 +806,57 @@ Note: start_date and end_date are auto-filled by the executor. Do NOT ask for th
   Params: issue_key* (string), time_spent* (string — "3h", "30m", "1h 30m"), comment (string, optional)
 
   time_spent format: "3h" not "3 hours". Executor auto-converts plain English to Jira format.
-  If issue_key not in task → ask_user.
-  If hours not in task → ask_user ("How many hours? e.g. 2h, 30m, 1.5h").
-  If BOTH are in task → skip all ask_user steps, go straight to jira_add_worklog.
+  If BOTH issue_key AND time_spent are in task → skip form, go straight to jira_add_worklog.
+  If EITHER is missing → collect ALL missing fields at once with request_form. NEVER use sequential ask_user.
 
-  Example "Log 3 hours on FLAG-42" (both given — 2 steps):
+  Example "Log 3 hours on FLAG-42" (both given):
   [{"id":"log","tool":"jira_add_worklog","params":{"issue_key":"FLAG-42","time_spent":"3 hours"},"success_criteria":"Time logged"},
    {"id":"done","tool":"direct_response","params":{"message":"Logged 3h on FLAG-42."}}]
 
-  Example "Log time on FLAG-42" (hours missing — ask):
-  [{"id":"ask_h","tool":"ask_user","params":{"question":"How many hours to log? (e.g. 2h, 30m, 1.5h)"}},
-   {"id":"log","tool":"jira_add_worklog","params":{"issue_key":"FLAG-42","time_spent":"{{ask_h.answer}}"},"success_criteria":"Time logged"},
-   {"id":"done","tool":"direct_response","params":{"message":"Logged {{ask_h.answer}} on FLAG-42."}}]
+  Example "Log time" (BOTH missing — form with both fields):
+  [{"id":"collect","tool":"request_form","params":{"title":"Log Time","fields":[
+      {"id":"issue_key","label":"Issue Key","type":"text","required":true,"placeholder":"e.g. FLAG-42"},
+      {"id":"time_spent","label":"Time Spent","type":"text","required":true,"placeholder":"e.g. 2h, 30m, 1.5h"}
+    ]},"success_criteria":"Details collected"},
+   {"id":"log","tool":"jira_add_worklog","params":{"issue_key":"{{collect.issue_key}}","time_spent":"{{collect.time_spent}}"},"success_criteria":"Time logged"},
+   {"id":"done","tool":"direct_response","params":{"message":"Logged {{collect.time_spent}} on {{collect.issue_key}}."}}]
+
+  Example "Log time on FLAG-42" (issue_key given, hours missing — form with only time_spent):
+  [{"id":"collect","tool":"request_form","params":{"title":"Log Time on FLAG-42","fields":[
+      {"id":"time_spent","label":"Time Spent","type":"text","required":true,"placeholder":"e.g. 2h, 30m, 1.5h"}
+    ]},"success_criteria":"Time collected"},
+   {"id":"log","tool":"jira_add_worklog","params":{"issue_key":"FLAG-42","time_spent":"{{collect.time_spent}}"},"success_criteria":"Time logged"},
+   {"id":"done","tool":"direct_response","params":{"message":"Logged {{collect.time_spent}} on FLAG-42."}}]
+
+── CHECK WORKLOGS / LOGGED HOURS (read-only queries) ──
+  "Do we have logged hours?", "show worklogs", "who logged time?" → use jira_search with worklogDate JQL.
+  ⚑ ALWAYS ask for the date/range first — NEVER assume today or any date.
+
+  JQL date functions for worklogDate (use these — plain English is NOT valid Jira JQL):
+    Today:          worklogDate = now()
+    Yesterday:      worklogDate = -1d
+    This week:      worklogDate >= startOfWeek()
+    Last week:      worklogDate >= startOfWeek(-1) AND worklogDate <= endOfWeek(-1)
+    This month:     worklogDate >= startOfMonth()
+    Last month:     worklogDate >= startOfMonth(-1) AND worklogDate <= endOfMonth(-1)
+    Specific date:  worklogDate = "2026-04-20"
+    Date range:     worklogDate >= "2026-04-01" AND worklogDate <= "2026-04-30"
+
+  ⚑ When the user answers with natural language ("last month", "this week", "yesterday"),
+    YOU must convert it to the correct JQL expression from the table above.
+    NEVER pass the user's raw words into the jql string.
+
+  MANDATORY plan for worklog queries when date is NOT given:
+  [{"id":"ask_date","tool":"ask_user","params":{"question":"Which period should I check logged hours for? (e.g. today, yesterday, this week, last month, or a specific date like April 20)"}},
+   {"id":"s","tool":"jira_search","params":{"jql":"worklogDate >= startOfMonth(-1) AND worklogDate <= endOfMonth(-1) AND worklogAuthor = currentUser()","limit":25},"success_criteria":"Worklogs found"},
+   {"id":"r","tool":"direct_response","params":{"message":"Logged hours:\n{{s}}"}}]
+
+  NOTE: Replace the hardcoded JQL in the template with the correct expression matching {{ask_date.answer}}.
+  Example: if user says "last month" → use "worklogDate >= startOfMonth(-1) AND worklogDate <= endOfMonth(-1)"
+           if user says "today"      → use "worklogDate = now()"
+           if user says "April 20"   → use "worklogDate = \"2026-04-20\""
+
+  If date IS in the task (e.g. "show worklogs for April 20") → skip ask_date, use JQL directly.
 
 ── LINK ISSUES (jira_create_issue_link) ──
   Tool: jira_create_issue_link
@@ -904,20 +943,284 @@ Note: start_date and end_date are auto-filled by the executor. Do NOT ask for th
   Subtask = jira_create_issue with issue_type="Sub-task" and parent_key set.
   Params: project_key*, issue_type="Sub-task"*, summary*, parent_key* (parent issue key e.g. "FLAG-42")
 
-  If parent_key not in task → ask_user.
-  If summary not in task → ask_user.
-  Project key is always derived from the parent issue key prefix.
+  Project key is always derived from the parent issue key prefix (e.g. "FLAG-42" → project_key="FLAG").
+  If BOTH parent_key AND summary are in task → go straight to jira_create_issue (no form).
+  If EITHER is missing → collect ALL missing fields at once with request_form. NEVER use sequential ask_user.
 
-  Example "Create subtask for FLAG-42: Write unit tests":
+  Example "Create subtask for FLAG-42: Write unit tests" (both given):
   [{"id":"cr","tool":"jira_create_issue","params":{"project_key":"FLAG","issue_type":"Sub-task","summary":"Write unit tests","parent_key":"FLAG-42"},"success_criteria":"Subtask created"},
+   {"id":"done","tool":"direct_response","params":{"message":"Subtask created under FLAG-42: {{cr}}"}}]
+
+  Example "Create a subtask" (BOTH missing — form with both fields):
+  [{"id":"collect","tool":"request_form","params":{"title":"Create Subtask","fields":[
+      {"id":"parent_key","label":"Parent Issue Key","type":"text","required":true,"placeholder":"e.g. FLAG-42"},
+      {"id":"summary","label":"Subtask Title","type":"text","required":true,"placeholder":"Short description"}
+    ]},"success_criteria":"Details collected"},
+   {"id":"cr","tool":"jira_create_issue","params":{"project_key":"{{collect.parent_key | split('-')[0]}}","issue_type":"Sub-task","summary":"{{collect.summary}}","parent_key":"{{collect.parent_key}}"},"success_criteria":"Subtask created"},
+   {"id":"done","tool":"direct_response","params":{"message":"Subtask created under {{collect.parent_key}}: {{cr}}"}}]
+
+  Example "Create a subtask for FLAG-42" (parent_key given, summary missing — form with only summary):
+  [{"id":"collect","tool":"request_form","params":{"title":"Create Subtask for FLAG-42","fields":[
+      {"id":"summary","label":"Subtask Title","type":"text","required":true,"placeholder":"Short description"}
+    ]},"success_criteria":"Summary collected"},
+   {"id":"cr","tool":"jira_create_issue","params":{"project_key":"FLAG","issue_type":"Sub-task","summary":"{{collect.summary}}","parent_key":"FLAG-42"},"success_criteria":"Subtask created"},
    {"id":"done","tool":"direct_response","params":{"message":"Subtask created under FLAG-42: {{cr}}"}}]
 
 ── STANDUP / DAILY BRIEFING ──
   Runs 3 parallel-intent JQL queries then aggregates into a single digest message.
-  [{"id":"my_ip","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status = 'In Progress'","limit":10},"success_criteria":"In-progress fetched"},
-   {"id":"done_y","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status = Done AND updated >= -1d","limit":10},"success_criteria":"Done yesterday fetched"},
-   {"id":"blockers","tool":"jira_search","params":{"jql":"sprint in openSprints() AND priority = Blocker AND status != Done","limit":10},"success_criteria":"Blockers fetched"},
+  [{"id":"my_ip","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status = 'In Progress'","limit":50},"success_criteria":"In-progress fetched"},
+   {"id":"done_y","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status = Done AND updated >= -1d","limit":50},"success_criteria":"Done yesterday fetched"},
+   {"id":"blockers","tool":"jira_search","params":{"jql":"sprint in openSprints() AND priority = Blocker AND status != Done","limit":50},"success_criteria":"Blockers fetched"},
    {"id":"show","tool":"direct_response","params":{"message":"**Daily Standup Digest**\n\n**In Progress:**\n{{my_ip}}\n\n**Completed Yesterday:**\n{{done_y}}\n\n**Active Blockers:**\n{{blockers}}"}}]
+
+── GET ISSUE DETAILS ──
+  "Show me FLAG-42", "What's the status of FLAG-42?", "Details for FLAG-42"
+  Use jira_get_issue — 2 steps only.
+  [{"id":"iss","tool":"jira_get_issue","params":{"issue_key":"FLAG-42"},"success_criteria":"Issue details returned"},
+   {"id":"show","tool":"direct_response","params":{"message":"{{iss}}"}}]
+
+  If issue_key not in task → ask_user for it first via request_form.
+
+── UPDATE ISSUE FIELDS ──
+  Tool: jira_update_issue
+  Params: issue_key* (string), fields* (dict of field→value pairs)
+
+  Common field names for the fields dict:
+    summary       → "summary": "New title"
+    priority      → "priority": "High"          (High, Medium, Low, Critical, Blocker)
+    labels        → "labels": ["backend", "urgent"]
+    fix_versions  → "fixVersions": [{"name": "v2.1"}]
+    due_date      → "duedate": "2026-05-01"
+    custom field  → use the exact Jira field ID (e.g. "customfield_10015": "value")
+
+  ⚑ NEVER guess a custom field ID — if the user asks to update a custom field by name and
+    the field ID is not explicitly stated, respond with direct_response explaining that
+    custom field IDs must be known to update them.
+
+  Example "Set priority of FLAG-42 to High":
+  [{"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"priority":"High"}},"success_criteria":"Priority updated"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 priority set to High."}}]
+
+  Example "Add label 'backend' to FLAG-42":
+  [{"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"labels":["backend"]}},"success_criteria":"Label added"},
+   {"id":"done","tool":"direct_response","params":{"message":"Label 'backend' added to FLAG-42."}}]
+
+  Example "Set due date of FLAG-42 to May 1":
+  [{"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"duedate":"2026-05-01"}},"success_criteria":"Due date set"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 due date set to May 1, 2026."}}]
+
+  If issue_key or field values are missing → collect via request_form (only missing fields).
+
+── DELETE ISSUE ──
+  ⚠️ DESTRUCTIVE — always require human_review before deleting.
+
+  [{"id":"gate","tool":"human_review","params":{"question":"Are you sure you want to delete FLAG-42? This action cannot be undone."},"success_criteria":"User confirmed"},
+   {"id":"del","tool":"jira_delete_issue","params":{"issue_key":"FLAG-42"},"success_criteria":"Issue deleted"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 has been deleted."}}]
+
+  If jira_delete_issue is not in AVAILABLE_MCP_TOOLS → respond with direct_response explaining
+  the tool is not available and suggest archiving/closing the issue instead (transition to Done or Cancelled).
+
+── CLONE / DUPLICATE ISSUE ──
+  There is no native jira_clone_issue tool. Clone by reading the original then collecting
+  confirmed details via request_form (pre-filled), then creating a new issue.
+  ⚑ DO NOT reference nested fields like {{orig.fields.summary}} — use request_form instead.
+
+  Example "Clone FLAG-42":
+  [{"id":"orig","tool":"jira_get_issue","params":{"issue_key":"FLAG-42"},"success_criteria":"Original issue loaded"},
+   {"id":"clone_info","tool":"request_form","params":{"title":"Clone FLAG-42 — Confirm Details","fields":[
+       {"id":"summary","label":"New Summary","type":"text","required":true,"placeholder":"Copy of <original summary>"},
+       {"id":"issue_type","label":"Issue Type","type":"select","required":true,"options":[{"value":"Task","label":"Task"},{"value":"Bug","label":"Bug"},{"value":"Story","label":"Story"},{"value":"Epic","label":"Epic"}]},
+       {"id":"description","label":"Description","type":"textarea","required":false,"placeholder":"(optional) leave blank to copy original"}
+     ]},"success_criteria":"Clone details confirmed"},
+   {"id":"cr","tool":"jira_create_issue","params":{"project_key":"FLAG","issue_type":"{{clone_info.issue_type}}","summary":"{{clone_info.summary}}","description":"{{clone_info.description}}"},"success_criteria":"Clone created"},
+   {"id":"done","tool":"direct_response","params":{"message":"Cloned: new issue {{cr.key}} created as a copy of FLAG-42."}}]
+
+── MOVE ISSUE ACROSS PROJECTS ──
+  Jira Cloud does not support moving issues across projects via API. Inform the user.
+  Instead offer to: (1) Clone the issue in the target project, (2) Close/cancel the original.
+
+  [{"id":"info","tool":"direct_response","params":{"message":"Jira Cloud does not allow moving issues between projects via API. I can instead:\n1. Create a copy in the target project\n2. Close/cancel the original issue in its current project\n\nShall I proceed with that approach?"}}]
+
+  If user confirms → follow CLONE flow then transition original to Cancelled.
+
+── BULK UPDATE ISSUES ──
+  "Mark all my in-progress issues as done", "Set priority to High for all bugs in FLAG"
+
+  Pattern: search → human_review gate → transition each issue individually (up to 10).
+  ⚠️ ALWAYS use human_review before bulk writes affecting more than 1 issue.
+  ⚑ There is NO jira_bulk_transition tool — always generate individual transition steps.
+  ⚑ DO NOT use array indexing like {{find._items[0].key}} — it is not supported in templates.
+  ⚑ Cap at 10 issues max. If the search returns more, warn the user and ask them to narrow.
+
+  Example "Close all my in-progress tasks" (generates steps for each issue individually):
+  [{"id":"find","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status = 'In Progress'","limit":50},"success_criteria":"Issues found"},
+   {"id":"gate","tool":"human_review","params":{"question":"I found {{find.total}} in-progress issue(s). Close all of them?\n\n{{find}}"},"success_criteria":"Confirmed"},
+   {"id":"get_tr_1","tool":"jira_get_transitions","params":{"issue_key":"FLAG-33"},"success_criteria":"Transitions fetched"},
+   {"id":"tr_1","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{get_tr_1}}"},"success_criteria":"FLAG-33 closed"},
+   {"id":"get_tr_2","tool":"jira_get_transitions","params":{"issue_key":"FLAG-34"},"success_criteria":"Transitions fetched"},
+   {"id":"tr_2","tool":"jira_transition_issue","params":{"issue_key":"FLAG-34","transition_id":"{{get_tr_2}}"},"success_criteria":"FLAG-34 closed"},
+   {"id":"done","tool":"direct_response","params":{"message":"Closed all selected in-progress issues."}}]
+
+  ⚑ The actual issue keys in the plan must come from what the user stated or a prior search result.
+    If issue keys are not known upfront, include only the search + gate steps, then direct_response
+    asking the user to confirm individual keys before proceeding with transitions.
+
+── EDIT / DELETE COMMENT ──
+  To edit or delete a comment, the comment_id is required.
+  ⚑ First check AVAILABLE_MCP_TOOLS. If jira_edit_comment or jira_delete_comment are NOT listed →
+    respond with direct_response explaining the limitation.
+
+  Workflow (only when tools ARE available):
+  Get issue → show full issue (includes comments) → ask user for comment ID → edit or delete.
+  ⚑ Use {{iss}} (full result) in the question — NOT {{iss.comments}} (nested field, won't resolve).
+
+  Edit comment:
+  [{"id":"iss","tool":"jira_get_issue","params":{"issue_key":"FLAG-42"},"success_criteria":"Issue loaded"},
+   {"id":"pick","tool":"ask_user","params":{"question":"Here is FLAG-42 (including comments):\n{{iss}}\n\nWhich comment ID should I edit?"}},
+   {"id":"collect","tool":"request_form","params":{"title":"Edit Comment","fields":[
+       {"id":"new_text","label":"New Comment Text","type":"textarea","required":true}
+     ]},"success_criteria":"New text collected"},
+   {"id":"edit","tool":"jira_edit_comment","params":{"issue_key":"FLAG-42","comment_id":"{{pick.answer}}","comment":"{{collect.new_text}}"},"success_criteria":"Comment edited"},
+   {"id":"done","tool":"direct_response","params":{"message":"Comment updated on FLAG-42."}}]
+
+  Delete comment:
+  [{"id":"iss","tool":"jira_get_issue","params":{"issue_key":"FLAG-42"},"success_criteria":"Issue loaded"},
+   {"id":"pick","tool":"ask_user","params":{"question":"Here is FLAG-42 (including comments):\n{{iss}}\n\nWhich comment ID should I delete?"}},
+   {"id":"gate","tool":"human_review","params":{"question":"Delete comment {{pick.answer}} from FLAG-42? This cannot be undone."},"success_criteria":"Confirmed"},
+   {"id":"del","tool":"jira_delete_comment","params":{"issue_key":"FLAG-42","comment_id":"{{pick.answer}}"},"success_criteria":"Comment deleted"},
+   {"id":"done","tool":"direct_response","params":{"message":"Comment deleted from FLAG-42."}}]
+
+── WORKFLOW INSPECTION ──
+  "What transitions are available for FLAG-42?", "What statuses can I move this to?",
+  "Why can't I move this issue?"
+
+  [{"id":"tr","tool":"jira_get_transitions","params":{"issue_key":"FLAG-42"},"success_criteria":"Transitions listed"},
+   {"id":"show","tool":"direct_response","params":{"message":"Available transitions for FLAG-42:\n{{tr}}"}}]
+
+  If the user asks "why can't I move to Done?" and the transition is not listed:
+  → direct_response explaining that the transition is not available for the current status,
+    and list what IS available from the {{tr}} result. Common causes: workflow conditions,
+    required fields, or permission restrictions.
+
+── ADVANCED JQL / SEARCH PATTERNS ──
+  Pagination: jira_search supports a 'limit' and 'start_at' (offset) param.
+    Default: use limit=100 for all list queries. For count-only queries use limit=1.
+    If the user wants to see more results beyond the first page → add a start_at param (0-based offset).
+    Example next page: jira_search(jql="...", limit=100, start_at=100)
+
+  Custom fields in JQL: use cf[NNNNN] syntax or the exact field name from the project schema.
+    Example: cf[10015] = "2026-04-01"   (if field ID 10015 is a date field)
+    ⚑ NEVER invent a cf[] number — only use if the user or context explicitly provides it.
+
+  Saved filters: Jira does not expose saved filters via standard MCP. Use direct JQL instead.
+
+  Useful advanced JQL patterns:
+    Issues with no comments:         comment is EMPTY
+    Issues due this week:            due >= startOfWeek() AND due <= endOfWeek()
+    Issues created last 7 days:      created >= -7d
+    Issues updated today:            updated >= startOfDay()
+    High-priority open bugs:         issuetype = Bug AND priority in (Critical, High) AND status != Done
+    My unresolved issues:            assignee = currentUser() AND resolution = Unresolved
+    Epics with open stories:         issuetype = Epic AND issueFunction in subtasksOf("status != Done")
+    Issues with fix version:         fixVersion = "v2.0"
+    Recently resolved:               resolution changed AFTER -1w
+    Issues changed by user:          assignee was changed by "john@example.com" AFTER -7d
+
+  ⚑ If JQL is syntactically invalid → catch in executor. Return direct_response with the error
+    and a corrected query suggestion.
+
+── SEARCH & DISCOVERY ──
+  "Find duplicate issues":
+  [{"id":"find","tool":"jira_search","params":{"jql":"summary ~ \"<keyword>\" AND status != Done","limit":25},"success_criteria":"Similar issues found"},
+   {"id":"show","tool":"direct_response","params":{"message":"Potentially duplicate issues:\n{{find}}\n\nReview manually for duplicates."}}]
+  ⚑ Replace <keyword> with the key term from the user's query.
+
+  "What changed recently?":
+  [{"id":"s","tool":"jira_search","params":{"jql":"project = FLAG AND updated >= -1d ORDER BY updated DESC","limit":25},"success_criteria":"Recent changes fetched"},
+   {"id":"show","tool":"direct_response","params":{"message":"Recently updated issues in FLAG:\n{{s}}"}}]
+
+  "Show unassigned issues":
+  [{"id":"s","tool":"jira_search","params":{"jql":"project = FLAG AND assignee is EMPTY AND status != Done","limit":25},"success_criteria":"Unassigned issues listed"},
+   {"id":"show","tool":"direct_response","params":{"message":"Unassigned open issues:\n{{s}}"}}]
+
+── META / SMART QUERIES ──
+  "What should I work on next?":
+  → Combine priority + sprint membership. Suggest highest-priority unfinished issue in current sprint.
+  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = currentUser() AND sprint in openSprints() AND status != Done ORDER BY priority ASC, updated DESC","limit":20},"success_criteria":"Priority items fetched"},
+   {"id":"show","tool":"direct_response","params":{"message":"Suggested next tasks (highest priority, in active sprint):\n{{s}}"}}]
+
+  "Which tickets are risky?":
+  → Blockers + high-priority issues in active sprint with no recent update.
+  [{"id":"s","tool":"jira_search","params":{"jql":"sprint in openSprints() AND (priority in (Blocker, Critical) OR (due <= now() AND status != Done)) ORDER BY priority ASC","limit":50},"success_criteria":"Risky tickets fetched"},
+   {"id":"show","tool":"direct_response","params":{"message":"Risky tickets in active sprint:\n{{s}}"}}]
+
+  "Summarize sprint progress":
+  [{"id":"total","tool":"jira_search","params":{"jql":"sprint in openSprints()","limit":1},"success_criteria":"Total count fetched"},
+   {"id":"done_sp","tool":"jira_search","params":{"jql":"sprint in openSprints() AND status = Done","limit":1},"success_criteria":"Done count fetched"},
+   {"id":"blocked","tool":"jira_search","params":{"jql":"sprint in openSprints() AND priority = Blocker AND status != Done","limit":10},"success_criteria":"Blockers fetched"},
+   {"id":"show","tool":"direct_response","params":{"message":"**Sprint Progress**\nTotal: {{total.total}} | Done: {{done_sp.total}} | Blockers: {{blocked.total}}\n\nBlockers:\n{{blocked}}"}}]
+
+  "Detect blockers automatically" → same as "Which tickets are risky?" above.
+
+── REPORTING & ANALYTICS ──
+  ⚑ Burndown charts, velocity reports, cycle time, and lead time are NOT available via MCP tools.
+    These are Jira dashboard features only accessible in the browser.
+    If the user asks for these → direct_response explaining the limitation and suggest:
+    1. Visiting the Jira board → Reports section manually.
+    2. Using jira_search to get approximate counts/data.
+
+  "How many bugs last month?":
+  ⚑ ASK for the project first if not stated. Then use JQL with created date.
+  [{"id":"s","tool":"jira_search","params":{"jql":"issuetype = Bug AND project = FLAG AND created >= startOfMonth(-1) AND created <= endOfMonth(-1)","limit":1},"success_criteria":"Bug count fetched"},
+   {"id":"show","tool":"direct_response","params":{"message":"Bugs created last month in FLAG: {{s.total}}"}}]
+
+── PERMISSIONS & USER INFO ──
+  "What permissions do I have?" → No direct MCP tool. Respond with:
+  direct_response: "Permission queries are not available via the current integration.
+  You can check your project permissions in Jira under Project Settings → Permissions."
+
+  "Is user X active?" → Use jira_search_users(query="X") and check the 'active' field in the result.
+
+── NATURAL LANGUAGE EDGE CASES ──
+  Handle these ambiguous phrases by applying CLARIFICATION FIRST rules:
+
+  "Fix that bug I told you about" / "that issue" / "it":
+  → No issue_key available. Do NOT guess. Use ask_user:
+    "Which issue are you referring to? Please share the issue key (e.g. FLAG-42) or a summary keyword."
+
+  "Move it forward" / "next step":
+  → Ambiguous status. Use jira_get_transitions on the known issue_key, then request_selection.
+    If issue_key also unknown → ask for it first.
+
+  "Assign to him" / "assign to her" / "assign to them":
+  → No assignee stated. Use ask_user: "Who should I assign this to?"
+    Then jira_search_users to resolve the name to accountId.
+
+  "Close everything" / "Done all" / "Mark all as done":
+  → Scope is unclear. Use ask_user to clarify scope:
+    "Which issues should I close? (e.g. 'all my in-progress issues in FLAG', or share the JQL)"
+    Then apply BULK UPDATE flow above with human_review gate.
+
+  "Create a task about X" / "task for X":
+  → "about X" is a topic, NOT a summary. ALWAYS ask for a proper 1-line summary via request_form.
+    Never use the user's vague phrase directly as the issue summary.
+
+── DANGEROUS / DESTRUCTIVE ACTIONS POLICY ──
+  These actions REQUIRE human_review (mandatory approval gate) BEFORE executing:
+    • Delete any issue (jira_delete_issue)
+    • Delete any comment (jira_delete_comment)
+    • Bulk close / transition more than 1 issue
+    • Bulk label / field update on more than 1 issue
+    • Close / archive a sprint
+    • Any action described as "all", "everything", "entire project"
+
+  human_review message MUST include:
+    • What will be affected (issue key(s), count, sprint name, etc.)
+    • What will happen (deleted, closed, updated to X)
+    • That it cannot be undone (for deletes)
+
+  If user declines → direct_response acknowledging the cancellation. NEVER proceed.
 
 ═══════════════════════════════════════════════════════════════════
 GOOGLE CALENDAR
@@ -929,8 +1232,19 @@ user_google_email is in AVAILABLE DATA and auto-injected — do NOT ask for it.
 ── VIEW MEETINGS (get_events) ──
 • NEVER call list_calendars first. Always use calendar_id "primary".
 • get_events returns PLAIN TEXT — use {{step_id}} in direct_response (NO sub-field).
-Plan: get_events(calendar_id="primary", time_min="<today>T00:00:00Z", time_max="<today>T23:59:59Z")
-      direct_response(message="Your meetings today:\n{{step_id}}")
+
+• If the user specifies a date (e.g. "today", "tomorrow", "April 25") → use it directly in time_min/max.
+• If the user does NOT specify a date → ask_user FIRST: "Which date should I check? (e.g. today, tomorrow, April 25)"
+  NEVER default to today without the user saying so.
+
+Example — date stated ("show my meetings today"):
+  get_events(calendar_id="primary", time_min="<today>T00:00:00Z", time_max="<today>T23:59:59Z")
+  direct_response(message="Your meetings today:\n{{step_id}}")
+
+Example — date NOT stated ("show my meetings"):
+  [{"id":"ask_date","tool":"ask_user","params":{"question":"Which date should I check meetings for? (e.g. today, tomorrow, April 25)"}},
+   {"id":"evts","tool":"get_events","params":{"calendar_id":"primary","time_min":"{{ask_date.answer}}T00:00:00Z","time_max":"{{ask_date.answer}}T23:59:59Z"}},
+   {"id":"show","tool":"direct_response","params":{"message":"Your meetings:\n{{evts}}"}}]
 
 ── AVAILABLE SLOTS / FREE TIME (query_freebusy) ──
 • "Available slots", "when am I free", "free time" → use query_freebusy, NOT get_events.
@@ -949,30 +1263,52 @@ CORRECT param names:
   If the slot is busy, use human_review to warn the user and ask if they want to proceed anyway.
   Only create the meeting after the user confirms.
 
-ALWAYS ask for missing info (BEFORE the freebusy check):
-  • summary — ask if not given in task
-  • start_time — ask if not given, then convert to RFC3339 (e.g. "today at 2pm" → "<today>T08:30:00Z")
-  • attendees — ALWAYS ask who to invite (may be solo or group)
-  • duration — ask if not given
+ALWAYS collect missing info in ONE request_form BEFORE the freebusy check.
+Required fields (collect any that are missing):
+  • title (summary) — what the meeting is called
+  • start_time — when it starts (user gives natural language; executor converts to RFC3339)
+  • duration — how long (e.g. "30 minutes", "1 hour")
+  • attendees — who to invite (emails, or "just me")
 
-MANDATORY plan template for "create a meeting":
+⚑ NEVER send separate ask_user calls for title, start_time, duration, attendees.
+  All missing fields MUST be collected together in a single request_form.
+
+MANDATORY plan template for "create a meeting" (all info missing):
 [
-  {"id":"ask_title","tool":"ask_user","params":{"question":"What should the meeting be called?"}},
-  {"id":"ask_attendees","tool":"ask_user","params":{"question":"Who would you like to invite? (emails, or 'just me')"}},
-  {"id":"ask_duration","tool":"ask_user","params":{"question":"How long? (e.g. '30 minutes', '1 hour')"}},
-  {"id":"check_busy","tool":"query_freebusy","params":{"time_min":"<start_time>","time_max":"<end_time>"},
+  {"id":"meeting_info","tool":"request_form","params":{"title":"New Meeting Details","fields":[
+      {"id":"title","label":"Meeting Title","type":"text","required":true,"placeholder":"e.g. Quarterly Review"},
+      {"id":"start_time","label":"Start Date & Time","type":"text","required":true,"placeholder":"e.g. tomorrow at 2pm, April 25 at 10am"},
+      {"id":"duration","label":"Duration","type":"text","required":true,"placeholder":"e.g. 30 minutes, 1 hour"},
+      {"id":"attendees","label":"Attendees","type":"text","required":true,"placeholder":"emails comma-separated, or 'just me'"}
+    ]},"success_criteria":"Meeting details collected"},
+  {"id":"check_busy","tool":"query_freebusy","params":{"time_min":"{{meeting_info.start_time}}","time_max":"{{meeting_info.start_time}}"},
    "success_criteria":"Freebusy checked"},
-  {"id":"conflict_gate","tool":"human_review","params":{"question":"⚠️ You have a conflict at this time:\n{{check_busy}}\n\nDo you still want to create the meeting?"},
+  {"id":"conflict_gate","tool":"human_review","params":{"question":"You have a conflict at this time:\n{{check_busy}}\n\nDo you still want to create the meeting?"},
    "condition":"{{check_busy}} contains busy period",
    "success_criteria":"User confirmed or slot is free — skip this step if no conflict"},
-  {"id":"create_evt","tool":"manage_event","params":{"action":"create","summary":"{{ask_title.answer}}","start_time":"<start_time>","duration":"{{ask_duration.answer}}","attendees":"{{ask_attendees.answer}}","calendar_id":"primary"}},
-  {"id":"confirm","tool":"direct_response","params":{"message":"✅ Meeting created: {{create_evt}}"}}
+  {"id":"create_evt","tool":"manage_event","params":{"action":"create","summary":"{{meeting_info.title}}","start_time":"{{meeting_info.start_time}}","duration":"{{meeting_info.duration}}","attendees":"{{meeting_info.attendees}}","calendar_id":"primary"}},
+  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting created: {{create_evt}}"}}
+]
+
+If the task already provides SOME fields (e.g. title is given but attendees/time are not):
+  Include only the MISSING fields in the request_form. Never re-ask for values already stated.
+
+Example — title given, rest missing ("create a meeting called Weekly Sync"):
+[
+  {"id":"meeting_info","tool":"request_form","params":{"title":"Weekly Sync — Meeting Details","fields":[
+      {"id":"start_time","label":"Start Date & Time","type":"text","required":true,"placeholder":"e.g. tomorrow at 2pm"},
+      {"id":"duration","label":"Duration","type":"text","required":true,"placeholder":"e.g. 30 minutes, 1 hour"},
+      {"id":"attendees","label":"Attendees","type":"text","required":true,"placeholder":"emails, or 'just me'"}
+    ]},"success_criteria":"Details collected"},
+  {"id":"check_busy","tool":"query_freebusy","params":{"time_min":"{{meeting_info.start_time}}","time_max":"{{meeting_info.start_time}}"},"success_criteria":"Freebusy checked"},
+  {"id":"conflict_gate","tool":"human_review","params":{"question":"Conflict detected:\n{{check_busy}}\n\nProceed anyway?"},"success_criteria":"Confirmed"},
+  {"id":"create_evt","tool":"manage_event","params":{"action":"create","summary":"Weekly Sync","start_time":"{{meeting_info.start_time}}","duration":"{{meeting_info.duration}}","attendees":"{{meeting_info.attendees}}","calendar_id":"primary"}},
+  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting created: {{create_evt}}"}}
 ]
 
 IMPORTANT:
 - If query_freebusy returns NO busy periods overlapping the requested slot → skip human_review, proceed directly to manage_event.
 - If there IS a conflict → show human_review with the conflict details. Only proceed if user says yes.
-- If the task already contains title AND attendees, skip those ask_user steps.
 
 
 ── UPDATE / DELETE MEETING (manage_event) ──
@@ -998,11 +1334,34 @@ user_google_email is auto-injected from settings — do NOT ask for it.
 
 ── SEND EMAIL (send_gmail_message) ──
 Params: to (required), subject (required), body (required)
-Ask for any of these if not given. user_google_email is auto-injected.
+user_google_email is auto-injected — do NOT ask for it.
+
+If ALL of to, subject, body are in task → go straight to send_gmail_message (no form).
+If ANY is missing → collect ALL missing fields at once with request_form. NEVER use sequential ask_user.
+
+Example — all given ("send email to alice@example.com subject Hello body Hi there"):
   {"id":"send","tool":"send_gmail_message","params":{"to":"alice@example.com","subject":"Hello","body":"Hi there"}}
 
-  {"id":"search","tool":"search_gmail_messages","params":{"query":"is:unread"}}
-  (Wait: search_gmail_messages DOES NOT support 'limit' or 'max_results'. Never pass those.)
+Example — all missing ("send an email"):
+[
+  {"id":"email_info","tool":"request_form","params":{"title":"Compose Email","fields":[
+      {"id":"to","label":"To (recipient email)","type":"text","required":true,"placeholder":"e.g. alice@example.com"},
+      {"id":"subject","label":"Subject","type":"text","required":true,"placeholder":"Email subject"},
+      {"id":"body","label":"Message Body","type":"text","required":true,"placeholder":"Email content"}
+    ]},"success_criteria":"Email details collected"},
+  {"id":"send","tool":"send_gmail_message","params":{"to":"{{email_info.to}}","subject":"{{email_info.subject}}","body":"{{email_info.body}}"},"success_criteria":"Email sent"},
+  {"id":"done","tool":"direct_response","params":{"message":"Email sent to {{email_info.to}}."}}
+]
+
+Example — recipient given, subject/body missing ("send email to alice@example.com"):
+[
+  {"id":"email_info","tool":"request_form","params":{"title":"Compose Email to alice@example.com","fields":[
+      {"id":"subject","label":"Subject","type":"text","required":true,"placeholder":"Email subject"},
+      {"id":"body","label":"Message Body","type":"text","required":true,"placeholder":"Email content"}
+    ]},"success_criteria":"Email details collected"},
+  {"id":"send","tool":"send_gmail_message","params":{"to":"alice@example.com","subject":"{{email_info.subject}}","body":"{{email_info.body}}"},"success_criteria":"Email sent"},
+  {"id":"done","tool":"direct_response","params":{"message":"Email sent to alice@example.com."}}
+]
 
 ── COUNT / SUMMARIZE EMAILS ──
 If the user asks "how many", "what is the count", or "total number" of emails, ALWAYS use `get_total_unread_emails`.
@@ -1014,6 +1373,7 @@ If you need metrics for specific labels (SPAM, TRASH, etc.), use `get_label_metr
 ── READ EMAIL (get_gmail_message_content) ──
 Params: message_id (from search result)
 Workflow: search → ask_user which message → get content
+⚠️ search_gmail_messages does NOT support 'limit' or 'max_results' — never pass those params.
   {"id":"search","tool":"search_gmail_messages","params":{"query":"from:boss@company.com"}},
   {"id":"ask_id","tool":"ask_user","params":{"question":"Which message would you like to read? Here are the results:\n{{search}}"}},
   {"id":"read","tool":"get_gmail_message_content","params":{"message_id":"{{ask_id.answer}}"}},
@@ -1901,7 +2261,7 @@ async def planner_node(state: AgentState) -> dict:
         _re_sprint.IGNORECASE,
     ):
         logger.info("[PLANNER] Special case: current sprint query")
-        # This requires a multi-step workflow that the LLM planner gets wrong
+        cached_projects = _cache_get("jira_projects") or []
         sprint_plan = [
             {
                 "id": "sel_proj",
@@ -1909,7 +2269,7 @@ async def planner_node(state: AgentState) -> dict:
                 "description": "Select project to check sprints",
                 "params": {
                     "question": "Which project do you want to check the current sprint for?",
-                    "options": "{{projects}}",  # This will be resolved from cached projects
+                    "options": cached_projects,
                     "multi_select": False,
                 },
                 "success_criteria": "Project selected",
@@ -1935,16 +2295,16 @@ async def planner_node(state: AgentState) -> dict:
             {
                 "id": "get_sprints",
                 "tool": "jira_get_sprints_from_board",
-                "description": "Get sprints for selected board",
-                "params": {"board_id": "{{sel_board.selected}}"},
-                "success_criteria": "Sprints retrieved",
+                "description": "Get active sprints for selected board",
+                "params": {"board_id": "{{sel_board.selected}}", "state": "active"},
+                "success_criteria": "Active sprints retrieved",
             },
             {
                 "id": "sel_sprint",
                 "tool": "request_selection",
-                "description": "Select which sprint to view",
+                "description": "Select active sprint (auto-selected if only one)",
                 "params": {
-                    "question": "Which sprint do you want to see issues for?",
+                    "question": "Which active sprint?",
                     "options": "{{get_sprints}}",
                     "multi_select": False,
                 },
@@ -1954,7 +2314,7 @@ async def planner_node(state: AgentState) -> dict:
                 "id": "get_issues",
                 "tool": "jira_get_sprint_issues",
                 "description": "Get issues in selected sprint",
-                "params": {"sprint_id": "{{sel_sprint.selected}}"},
+                "params": {"sprint_id": "{{sel_sprint.selected}}", "limit": 100},
                 "success_criteria": "Sprint issues retrieved",
             },
             {
@@ -2020,7 +2380,11 @@ async def planner_node(state: AgentState) -> dict:
     _today = _date.today().isoformat()  # e.g. 2026-04-18
 
     context_parts = [f"TASK: {task}"]
-    context_parts.append(f"TODAY'S DATE: {_today}  (use this for any date-relative queries)")
+    context_parts.append(
+        f"TODAY'S DATE: {_today}  "
+        "(ONLY use this when the user explicitly says 'today', 'this week', 'yesterday', etc. "
+        "NEVER auto-fill a date the user did not mention — ask_user for the date instead.)"
+    )
 
     context_parts.append(f"CONFIGURED SITES (use these names with browser_login): [{site_names}]")
 

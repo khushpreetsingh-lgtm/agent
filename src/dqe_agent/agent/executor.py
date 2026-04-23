@@ -17,6 +17,9 @@ from langgraph.errors import GraphInterrupt
 from dqe_agent.guardrails import COST_PER_CALL, GuardrailError
 from dqe_agent.state import AgentState
 
+# Import project-key validator from planner (avoids circular imports — planner doesn't import executor)
+from dqe_agent.agent.planner import _is_valid_jira_key  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 
@@ -392,6 +395,17 @@ async def executor_node(state: AgentState) -> dict:
                     else:
                         response_msg = formatted
 
+            # --- Cleanup sprint responses that have a spurious "Available Priorities" section ---
+            # The planner LLM sometimes hallucinates this header into sprint direct_response messages.
+            if "Available Priorities" in response_msg and (
+                "sprint" in response_msg.lower() or "Sprint" in response_msg
+            ):
+                import re as _re_sprint
+
+                response_msg = _re_sprint.sub(
+                    r"\s*Available Priorities[^\n]*\n?", "\n", response_msg
+                ).strip()
+
             # --- Cleanup Gmail Search Output ---
             if (
                 "Found " in response_msg
@@ -588,12 +602,17 @@ async def executor_node(state: AgentState) -> dict:
     for _internal in ("ctx", "kwargs"):
         resolved_params.pop(_internal, None)
 
-    # Warn about params that still contain unresolved {{}} templates
+    # Warn and STRIP params that still contain unresolved {{}} templates.
+    # Passing raw template strings to tools causes Pydantic validation errors.
     _unresolved = [k for k, v in resolved_params.items() if isinstance(v, str) and "{{" in v]
     if _unresolved:
         logger.warning(
-            "[EXECUTOR] Unresolved template params for step '%s': %s", step_id, _unresolved
+            "[EXECUTOR] Unresolved template params for step '%s': %s — stripping before tool call",
+            step_id,
+            _unresolved,
         )
+        for _uk in _unresolved:
+            resolved_params.pop(_uk, None)
 
     logger.info(
         "[EXECUTOR] Resolved params for '%s': %s",
@@ -603,6 +622,39 @@ async def executor_node(state: AgentState) -> dict:
 
     # Tool-specific param normalization (pass context so recovery can scan step results)
     resolved_params = _normalize_tool_params(tool_name, resolved_params, flow_data, results_by_id)
+
+    # ── Auto-select: skip interrupt when request_selection has exactly 1 option ──
+    if tool_name == "request_selection":
+        opts = resolved_params.get("options", [])
+        if isinstance(opts, list) and len(opts) == 1:
+            auto_val = opts[0].get("value", "")
+            auto_label = opts[0].get("label", auto_val)
+            logger.info(
+                "[EXECUTOR] request_selection: single option — auto-selecting %r", auto_val
+            )
+            result_json = json.dumps({"selected": auto_val, "answer": auto_val})
+            merged_flow = dict(state.get("flow_data", {}))
+            merged_flow[step_id] = {"selected": auto_val, "answer": auto_val}
+            return {
+                "step_results": state.get("step_results", [])
+                + [
+                    {
+                        "step_id": step_id,
+                        "step_index": idx,
+                        "tool": tool_name,
+                        "status": "success",
+                        "result": result_json,
+                        "error": "",
+                        "duration_ms": 0,
+                        "retries": 0,
+                    }
+                ],
+                "steps_taken": steps_taken + 1,
+                "estimated_cost": cost,
+                "status": "verifying",
+                "flow_data": merged_flow,
+                "messages": [AIMessage(content=f"Auto-selected: {auto_label}")],
+            }
 
     # Special handling for jira_delete_issue with multiple issue keys
     if tool_name == "jira_delete_issue" and "issue_key" in resolved_params:
@@ -713,19 +765,33 @@ async def executor_node(state: AgentState) -> dict:
         if tool is None:
             raise ValueError(f"Tool '{tool_name}' not found")
     except KeyError:
-        # Tool doesn't exist — return a graceful direct response instead of failing the task.
-        logger.warning("[EXECUTOR] Tool '%s' not found — responding gracefully", tool_name)
-        msg = f"I don't have a tool to perform '{tool_name.replace('_', ' ')}' directly. I'll answer based on available information."
+        # Tool doesn't exist — this is a hard failure, not recoverable.
+        try:
+            from dqe_agent.tools import list_tool_names
+
+            available = list_tool_names()
+        except Exception:
+            available = []
+        logger.error("[EXECUTOR] Tool '%s' not found — available tools: %s", tool_name, available)
+
+        # Provide helpful hint for common misnamed tools
+        hint = ""
+        if tool_name == "jira_get_active_sprints":
+            hint = " (hint: use 'jira_get_sprints_from_board' with state='active' after selecting a board)"
+        elif tool_name == "jira_delete_comment":
+            hint = " (note: jira_delete_comment may not be available in your mcp-atlassian version)"
+
+        error_msg = f"Tool '{tool_name}' is not available in this environment.{hint}"
         return {
             "step_results": state.get("step_results", [])
             + [
                 {
                     "step_id": step_id,
                     "step_index": idx,
-                    "tool": "direct_response",
-                    "status": "success",
-                    "result": msg,
-                    "error": "",
+                    "tool": tool_name,
+                    "status": "failed",
+                    "result": "",
+                    "error": error_msg,
                     "duration_ms": 0,
                     "retries": 0,
                 }
@@ -734,7 +800,7 @@ async def executor_node(state: AgentState) -> dict:
             "estimated_cost": cost,
             "status": "verifying",
             "flow_data": dict(state.get("flow_data", {})),
-            "messages": [AIMessage(content=msg)],
+            "messages": [AIMessage(content=f"Error: {error_msg}")],
         }
 
     try:
@@ -1197,6 +1263,55 @@ def _normalize_tool_params(
     # Must run BEFORE tool-specific logic so the specific blocks see clean params.
     params = _strip_invalid_params(tool_name, params)
 
+    # ── Auto-recover project_key from cached projects when LLM guessed a name ──
+    # The planner sometimes infers a plain project name (e.g. "insure tech") and passes
+    # it as project_key. If it's not a valid Jira key, try to map it to the real key
+    # using the jira_projects cache built at startup.
+    if (
+        tool_name
+        in (
+            "jira_create_issue",
+            "jira_get_assignable_users",
+            "jira_get_issues_in_project",
+            "jira_search_issues",
+            "jira_update_issue",
+            "jira_delete_issue",
+        )
+        and "project_key" in params
+    ):
+        raw_pk = params["project_key"]
+        if isinstance(raw_pk, str):
+            pk = raw_pk.strip()
+            # Not a valid Jira key (must be 2-10 uppercase alphanumeric)?
+            if not _is_valid_jira_key(pk):
+                try:
+                    from dqe_agent.agent.planner import _cache_get as _planner_cache_get
+
+                    cached_projects = _planner_cache_get("jira_projects") or []
+                    # If the key is already an exact match to a cache value, keep it as-is
+                    # (handles keys that look long/unusual but are real Jira project keys)
+                    if any(p.get("value", "").upper() == pk.upper() for p in cached_projects):
+                        logger.debug(
+                            "[EXECUTOR] project_key %r is a known cache value — no recovery needed",
+                            pk,
+                        )
+                    else:
+                        # Find a project whose label contains the given string (case-insensitive)
+                        matches = [
+                            p for p in cached_projects if pk.lower() in p.get("label", "").lower()
+                        ]
+                        if len(matches) == 1:
+                            new_key = matches[0]["value"]
+                            logger.info(
+                                "[EXECUTOR] project_key recovery: %r → %r (matched label %r)",
+                                raw_pk,
+                                new_key,
+                                matches[0]["label"],
+                            )
+                            params["project_key"] = new_key
+                except Exception as e:
+                    logger.debug("[EXECUTOR] project_key recovery error: %s", e)
+
     # ── request_selection: ensure options is a proper [{value,label}] list ──
     if tool_name == "request_selection":
         # ── RULE: always allow multi-select when the user picks issues to delete ──
@@ -1345,35 +1460,67 @@ def _normalize_tool_params(
                     pass
 
     if tool_name == "jira_create_sprint":
-        # start_date / end_date are required by the MCP schema.
-        # Default to tomorrow → tomorrow+14 days to avoid Jira rejecting today as "in the past".
-        # Use timezone-aware ISO format (UTC) to avoid offset-naive vs offset-aware comparison errors.
         from datetime import datetime, timezone, timedelta
+        import re as _red
 
         now_utc = datetime.now(timezone.utc)
         tomorrow_utc = now_utc + timedelta(days=1)
         default_start = tomorrow_utc.strftime("%Y-%m-%dT00:00:00+00:00")
         default_end = (tomorrow_utc + timedelta(days=14)).strftime("%Y-%m-%dT00:00:00+00:00")
 
-        def _is_date(v: Any) -> bool:
-            if not isinstance(v, str):
-                return False
-            import re as _red
+        def _normalise_sprint_date(v: Any) -> str | None:
+            """Convert user-provided date string to Jira ISO format, or return None if blank/missing."""
+            if not v or not isinstance(v, str):
+                return None
+            v = v.strip()
+            if not v:
+                return None
+            # Already ISO: 2026-05-01 or 2026-05-01T...
+            if _red.match(r"^\d{4}-\d{2}-\d{2}", v):
+                # Ensure full datetime with offset
+                if "T" not in v:
+                    return v + "T00:00:00+00:00"
+                return v
+            # Natural language
+            v_low = v.lower()
+            if v_low in ("today",):
+                return now_utc.strftime("%Y-%m-%dT00:00:00+00:00")
+            if v_low in ("tomorrow",):
+                return tomorrow_utc.strftime("%Y-%m-%dT00:00:00+00:00")
+            if "next week" in v_low:
+                return (now_utc + timedelta(days=7)).strftime("%Y-%m-%dT00:00:00+00:00")
+            # Try dateutil if available, else fall back to None
+            try:
+                from dateutil import parser as _du
+                parsed = _du.parse(v, default=now_utc.replace(tzinfo=timezone.utc))
+                return parsed.strftime("%Y-%m-%dT00:00:00+00:00")
+            except Exception:
+                return None
 
-            return bool(_red.match(r"^\d{4}-\d{2}-\d{2}", v.strip()))
+        sd = _normalise_sprint_date(params.get("start_date"))
+        ed = _normalise_sprint_date(params.get("end_date"))
 
-        if not _is_date(params.get("start_date")):
-            logger.info(
-                "[EXECUTOR] jira_create_sprint: defaulting start_date to %s (tomorrow)",
+        if sd:
+            params["start_date"] = sd
+        else:
+            logger.warning(
+                "[EXECUTOR] jira_create_sprint: start_date not provided — falling back to %s",
                 default_start,
             )
             params["start_date"] = default_start
-        if not _is_date(params.get("end_date")):
-            logger.info(
-                "[EXECUTOR] jira_create_sprint: defaulting end_date to %s (tomorrow+14)",
+
+        if ed:
+            params["end_date"] = ed
+        else:
+            logger.warning(
+                "[EXECUTOR] jira_create_sprint: end_date not provided — falling back to %s",
                 default_end,
             )
             params["end_date"] = default_end
+
+        # Remove goal if empty — it's optional and some Jira instances reject empty strings
+        if "goal" in params and not params["goal"]:
+            params.pop("goal")
 
         # board_id: recover from prior selection if still a template
         if isinstance(params.get("board_id"), str) and "{{" in params["board_id"]:
@@ -1532,6 +1679,60 @@ def _normalize_tool_params(
 
     # ── jira_search: sanitize JQL + exclude description field (ADF bug in mcp-atlassian) ──
     if tool_name == "jira_search":
+        # Convert plain-English worklogDate values to valid Jira JQL date functions.
+        # The planner may pass the user's raw answer ("last month") into the JQL string.
+        _jql_raw = params.get("jql", "")
+        if isinstance(_jql_raw, str) and "worklogDate" in _jql_raw:
+            import re as _re_wl
+            from datetime import date as _wl_date
+
+            _WORKLOG_DATE_MAP = {
+                "today": "worklogDate = now()",
+                "yesterday": "worklogDate = -1d",
+                "this week": "worklogDate >= startOfWeek()",
+                "last week": "worklogDate >= startOfWeek(-1) AND worklogDate <= endOfWeek(-1)",
+                "this month": "worklogDate >= startOfMonth()",
+                "last month": "worklogDate >= startOfMonth(-1) AND worklogDate <= endOfMonth(-1)",
+                "last 30 days": "worklogDate >= -30d",
+                "last 7 days": "worklogDate >= -7d",
+            }
+            # Detect if the JQL has worklogDate = "<plain text>" (not a real date/function)
+            _wl_m = _re_wl.search(r'worklogDate\s*=\s*["\']([^"\'0-9][^"\']*)["\']', _jql_raw)
+            if _wl_m:
+                _phrase = _wl_m.group(1).strip().lower()
+                _replacement = _WORKLOG_DATE_MAP.get(_phrase)
+                if _replacement:
+                    # Replace the bad clause with proper JQL
+                    params["jql"] = _re_wl.sub(
+                        r'worklogDate\s*=\s*["\'][^"\']*["\']', _replacement, _jql_raw
+                    )
+                    logger.info(
+                        "[EXECUTOR] jira_search: converted worklogDate %r → %r",
+                        _phrase,
+                        _replacement,
+                    )
+                else:
+                    # Try to parse as a date ("April 20", "20 April 2026", etc.)
+                    try:
+                        from dateutil import parser as _dup
+                        _parsed = _dup.parse(_phrase, default=_wl_date.today())
+                        _iso = _parsed.strftime("%Y-%m-%d")
+                        params["jql"] = _re_wl.sub(
+                            r'worklogDate\s*=\s*["\'][^"\']*["\']',
+                            f'worklogDate = "{_iso}"',
+                            _jql_raw,
+                        )
+                        logger.info(
+                            "[EXECUTOR] jira_search: parsed worklogDate phrase %r → %r",
+                            _phrase,
+                            _iso,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[EXECUTOR] jira_search: unrecognised worklogDate phrase %r — JQL unchanged",
+                            _phrase,
+                        )
+
         jql = params.get("jql", "")
         if not isinstance(jql, str) or not jql.strip():
             import re as _re_jql
