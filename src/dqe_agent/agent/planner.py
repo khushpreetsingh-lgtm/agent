@@ -3,6 +3,7 @@
 Uses a LARGE model (Opus / GPT-4o / o1) but runs only ONCE per task.
 This is where the expensive thinking happens — the executor just follows the plan.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,14 +22,28 @@ logger = logging.getLogger(__name__)
 
 # ── Keywords that signal Jira involvement ────────────────────────────────────
 _JIRA_KEYWORDS = {
-    "jira", "ticket", "issue", "sprint", "board", "epic", "story", "backlog",
+    "jira",
+    "ticket",
+    "issue",
+    "sprint",
+    "board",
+    "epic",
+    "story",
+    "backlog",
     # also trigger for common creation verbs when Jira context is implied
-    "task", "bug", "subtask", "create ticket", "create issue", "create task",
-    "create sprint", "create story", "create epic",
+    "task",
+    "bug",
+    "subtask",
+    "create ticket",
+    "create issue",
+    "create task",
+    "create sprint",
+    "create story",
+    "create epic",
 }
 
 # ── In-memory cache for common data (Jira projects, sprints, etc.) ────────────
-_CACHE: dict[str, tuple[float, Any]] = {}   # key -> (fetch_time, data)
+_CACHE: dict[str, tuple[float, Any]] = {}  # key -> (fetch_time, data)
 _CACHE_LOCK = asyncio.Lock()
 _CACHE_TTL = 600  # seconds — refresh every 10 minutes
 
@@ -76,10 +91,20 @@ async def _prewarm_mcp_tool_block() -> None:
     an instant cache hit instead.
     """
     from dqe_agent.tools import list_tool_names, get_tool as _get_tool
+
     _browser_tool_set = {
-        "browser_login", "browser_navigate", "browser_act", "browser_extract",
-        "browser_click", "browser_type", "browser_wait", "browser_snapshot",
-        "ask_user", "human_review", "ask_user_choice", "direct_response",
+        "browser_login",
+        "browser_navigate",
+        "browser_act",
+        "browser_extract",
+        "browser_click",
+        "browser_type",
+        "browser_wait",
+        "browser_snapshot",
+        "ask_user",
+        "human_review",
+        "ask_user_choice",
+        "direct_response",
         "request_selection",
     }
     mcp_tools = [t for t in list_tool_names() if t not in _browser_tool_set]
@@ -98,7 +123,11 @@ async def _prewarm_mcp_tool_block() -> None:
             desc = tool_obj.description or ""
             param_str = ""
             try:
-                schema = tool_obj.args_schema.model_json_schema() if hasattr(tool_obj, "args_schema") and tool_obj.args_schema else {}
+                schema = (
+                    tool_obj.args_schema.model_json_schema()
+                    if hasattr(tool_obj, "args_schema") and tool_obj.args_schema
+                    else {}
+                )
                 props = schema.get("properties", {})
                 required = set(schema.get("required", []))
                 if props:
@@ -137,14 +166,25 @@ async def _prefetch_selection_options(task: str, context_parts: list) -> None:
 
     # ── Jira: fetch projects if task is Jira-related ─────────────────────────
     # Strong keywords → always trigger Jira prefetch
-    _JIRA_STRONG = {"jira", "ticket", "sprint", "board", "epic", "backlog",
-                    "create ticket", "create issue", "create sprint",
-                    "create story", "create epic", "jira issue"}
+    _JIRA_STRONG = {
+        "jira",
+        "ticket",
+        "sprint",
+        "board",
+        "epic",
+        "backlog",
+        "create ticket",
+        "create issue",
+        "create sprint",
+        "create story",
+        "create epic",
+        "jira issue",
+    }
     # Weak keywords → trigger only if a strong keyword is also present
     _JIRA_WEAK = {"issue", "task", "bug", "subtask", "story"}
 
     _has_strong = any(kw in task_lower for kw in _JIRA_STRONG)
-    _has_weak   = any(kw in task_lower for kw in _JIRA_WEAK)
+    _has_weak = any(kw in task_lower for kw in _JIRA_WEAK)
     if _has_strong or (_has_weak and _has_strong):
         await _prefetch_jira_projects(context_parts)
 
@@ -204,7 +244,9 @@ def _unwrap_mcp_result(raw: Any) -> Any:
     if not isinstance(first, dict):
         return raw
     # Detect content-block format: every item has {"type": "text", "text": ...}
-    if all(isinstance(item, dict) and item.get("type") == "text" and "text" in item for item in raw):
+    if all(
+        isinstance(item, dict) and item.get("type") == "text" and "text" in item for item in raw
+    ):
         combined = "\n".join(item["text"] for item in raw)
         try:
             return json.loads(combined)
@@ -217,8 +259,20 @@ async def _fetch_and_cache_jira_projects(context_parts: list) -> None:
     """Actually call the MCP tool, cache the result, and inject into context."""
     from dqe_agent.tools import get_tool, list_tool_names
 
-    _DISQUALIFIERS = {"issue", "sprint", "board", "comment", "worklog", "member",
-                      "component", "version", "field", "attachment", "link", "transition"}
+    _DISQUALIFIERS = {
+        "issue",
+        "sprint",
+        "board",
+        "comment",
+        "worklog",
+        "member",
+        "component",
+        "version",
+        "field",
+        "attachment",
+        "link",
+        "transition",
+    }
 
     def _score(name: str) -> int:
         n = name.lower()
@@ -239,7 +293,8 @@ async def _fetch_and_cache_jira_projects(context_parts: list) -> None:
 
     candidates = sorted(
         [(name, _score(name)) for name in list_tool_names()],
-        key=lambda x: x[1], reverse=True,
+        key=lambda x: x[1],
+        reverse=True,
     )
     candidates = [(name, sc) for name, sc in candidates if sc > 0]
 
@@ -263,7 +318,9 @@ async def _fetch_and_cache_jira_projects(context_parts: list) -> None:
                 _inject_jira_projects(options, context_parts)
                 return
             else:
-                logger.warning("[PLANNER] '%s' returned no parseable projects — trying next", tool_name)
+                logger.warning(
+                    "[PLANNER] '%s' returned no parseable projects — trying next", tool_name
+                )
 
         except Exception as exc:
             logger.warning("[PLANNER] '%s' failed (%s) — trying next candidate", tool_name, exc)
@@ -272,7 +329,8 @@ async def _fetch_and_cache_jira_projects(context_parts: list) -> None:
 
 
 import re as _re
-_VALID_JIRA_KEY = _re.compile(r'^[A-Z][A-Z0-9]{1,9}$')
+
+_VALID_JIRA_KEY = _re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
 
 
 def _is_valid_jira_key(raw: str) -> bool:
@@ -324,10 +382,7 @@ def _parse_jira_projects(result_raw: Any, result_str: str) -> list[dict]:
                 logger.debug("[PLANNER] Skipping project item with no valid key: %s", item)
                 continue
 
-            name = (
-                item.get("name") or item.get("projectName") or
-                item.get("displayName") or key
-            )
+            name = item.get("name") or item.get("projectName") or item.get("displayName") or key
             # Ensure value is JUST the key, label is for display
             options.append({"value": key, "label": f"{key} — {name}"})
 
@@ -338,7 +393,7 @@ def _parse_jira_projects(result_raw: Any, result_str: str) -> list[dict]:
 
     # ── String fallback: scan for KEY — Name patterns ────────────────────────
     if not options and result_str:
-        for m in _re.finditer(r'\b([A-Z][A-Z0-9]{1,9})\b', result_str):
+        for m in _re.finditer(r"\b([A-Z][A-Z0-9]{1,9})\b", result_str):
             key = m.group(1)
             if key not in {o["value"] for o in options}:
                 options.append({"value": key, "label": key})
@@ -347,9 +402,23 @@ def _parse_jira_projects(result_raw: Any, result_str: str) -> list[dict]:
 
 
 _BROWSER_TASK_KEYWORDS = {
-    "netsuite", "cpq", "quote", "browser", "website", "web", "page",
-    "login", "navigate", "click", "fill", "scroll", "form", "screenshot",
-    "http", "https", "url",
+    "netsuite",
+    "cpq",
+    "quote",
+    "browser",
+    "website",
+    "web",
+    "page",
+    "login",
+    "navigate",
+    "click",
+    "fill",
+    "scroll",
+    "form",
+    "screenshot",
+    "http",
+    "https",
+    "url",
 }
 
 
@@ -402,6 +471,7 @@ TOOLS
   Listed in AVAILABLE_MCP_TOOLS injected into the context below.
   Call them directly as a step tool. Param names must exactly match the schema.
   Never add extra params like "ctx", "priority", "auth_check" — only schema params.
+  ⛔ NEVER invent tool names. If a capability is not in AVAILABLE_MCP_TOOLS, use direct_response to explain the limitation instead of fabricating a tool name.
 
 ── BROWSER TOOLS (web automation only — see BROWSER INSTRUCTIONS section if present) ──
   browser_login(site)                   log in to a configured site
@@ -459,39 +529,43 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
 ⛔ NEVER skip or reorder these phases. NEVER use request_selection alone for project — it must be
    part of a request_form that also collects summary and priority in ONE interaction.
 
-  PHASE 1 — Fetch priorities first (no user interaction):
-    jira_get_priorities()  → needed for the form's priority dropdown
+  PHASE 1 — Fetch data (no user interaction — TWO steps before the form):
+    Step A: jira_get_priorities()           → id: "get_pri"    (needed for priority dropdown)
+    Step B: jira_get_assignable_users()     → id: "fetch_users" (needed for assignee dropdown)
+            project_key: "<<FIRST_PROJECT_KEY>>" — executor resolves this automatically
 
-  PHASE 2 — Collect ALL missing info in ONE request_form:
-    Fields to include (skip only if the exact value was given in the current message):
-      • project   — select, options from JIRA_PROJECTS list
-      • summary   — text, required (SHORT issue title — 1 line. "about X" or topic in message
-                    is desc_topic NOT summary — ALWAYS ask for summary separately)
-      • issue_type— select (Task/Bug/Story/Epic) — skip if stated explicitly
-      • priority  — select, options: "{{get_pri}}" — ALWAYS collect unless user named exact priority
-      • desc_topic— textarea, optional (what the description should cover)
-    ⚑ Batch ALL missing fields into ONE form — never use separate request_selection for project alone.
-    ⚑ summary is ALWAYS required in the form unless the user wrote a complete title (not just a topic).
-    ⚑ priority is ALWAYS required unless user stated an exact priority name that matches the list.
+  PHASE 2 — Collect ALL info in ONE request_form (NEVER split into multiple interactions):
+    ⚑ ALL of the following go in ONE form — user fills and submits once.
+    ⚑ EVERY field dict MUST include an "id" key — this is how values are referenced later.
+    ⚑ summary is ALWAYS required. "about X" or a topic phrase is NOT a summary — always ask.
+    ⚑ priority is ALWAYS required unless user stated an exact priority name.
+    ⚑ assignee MUST be a select field using {{fetch_users}} — NEVER a text field.
+      ⛔ NEVER use separate jira_get_assignable_users + request_selection steps for assignee.
 
-  PHASE 3 — Assignee (choose ONE case based on CURRENT message only):
-    CASE A — "for me" / "assign to me"    → skip; hardcode {"accountId":"me"} in PHASE 6
-    CASE B — name given ("for hrithik")   → skip; executor resolves name→accountId in PHASE 6
-             ⛔ CASE B applies ONLY when the name appears in the CURRENT message. Never from history.
-    CASE C — no assignee mentioned        → jira_get_assignable_users(project_key={{form.project}})
-                                            → request_selection(options:"{{fetch_users}}")
+    EXACT JSON for PHASE 1 + PHASE 2 (copy verbatim — do NOT change ids):
+    {"id":"get_pri","tool":"jira_get_priorities","params":{},"success_criteria":"Priorities fetched"},
+    {"id":"fetch_users","tool":"jira_get_assignable_users","params":{"project_key":"<<FIRST_PROJECT_KEY>>"},"success_criteria":"Users fetched"},
+    {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Task","fields":[
+      {"id":"project","label":"Project","type":"select","required":true,"options":"<<JIRA_PROJECTS_PREFETCHED>>"},
+      {"id":"summary","label":"Task Summary","type":"text","required":true,"placeholder":"Short one-line title"},
+      {"id":"issue_type","label":"Issue Type","type":"select","required":true,"options":[{"value":"Task","label":"Task"},{"value":"Bug","label":"Bug"},{"value":"Story","label":"Story"},{"value":"Epic","label":"Epic"}]},
+      {"id":"priority","label":"Priority","type":"select","required":true,"options":"{{get_pri}}"},
+      {"id":"assignee","label":"Assignee","type":"select","required":false,"options":"{{fetch_users}}"},
+      {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?"}
+    ]},"success_criteria":"All task details collected"}
 
-  PHASE 4 — Generate description (AFTER all fields confirmed):
-    llm_draft_content(content_type="issue_description", topic={{form.desc_topic or message topic}},
-                      context="{{form.issue_type}} in {{form.project}}: {{form.summary}}, priority {{form.priority}}")
+  PHASE 3 — Generate description (AFTER form submitted):
+    llm_draft_content(content_type="issue_description",
+                      topic="{{collect_info.desc_topic}}",
+                      context="{{collect_info.issue_type}} in {{collect_info.project}}: {{collect_info.summary}}, priority {{collect_info.priority}}")
 
-  PHASE 5 — Let user review/edit the description:
-    request_edit(label="Issue Description", content={{gen_desc.content}})
+  PHASE 4 — Let user review/edit the description:
+    request_edit(label="Issue Description", content="{{gen_desc.content}}")
 
-  PHASE 6 — Create + update:
-    jira_create_issue(project_key={{form.project}}, issue_type={{form.issue_type}},
-                      summary={{form.summary}}, description={{edit_desc.content}})
-    jira_update_issue(issue_key={{create}}, fields={priority:{name:{{form.priority}}}, assignee:{...}})
+  PHASE 5 — Create + update:
+    jira_create_issue(project_key="{{collect_info.project}}", issue_type="{{collect_info.issue_type}}",
+                      summary="{{collect_info.summary}}", description="{{edit_desc.content}}")
+    jira_update_issue(issue_key="{{create_issue.key}}", fields={"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"})
 
   project_key rules:
     • MUST be a short ALL-UPPERCASE key like FLAG, DEV, PROJ.
@@ -536,6 +610,25 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
     {"id":"search","tool":"jira_search","params":{"jql":"project = FLAG AND status != Done","limit":10}},
     {"id":"show","tool":"direct_response","params":{"message":"Open issues in FLAG:\n{{search}}"}}
   ]
+
+── DELETE ISSUE (jira_delete_issue) ──
+  Tool: jira_delete_issue
+  Params: issue_key* (string, e.g. "FLAG-42")
+  ⛔ ALWAYS ask the user to confirm before deleting — deletion is permanent.
+  ALWAYS search first so the user picks from a real list (never ask for a key by text).
+
+   Workflow for "delete some tasks in my project":
+  [
+    {"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false}},
+    {"id":"search","tool":"jira_search","params":{"jql":"project = {{sel_proj.selected}} ORDER BY created DESC","limit":100}},
+    {"id":"sel_issue","tool":"request_selection","params":{"question":"Which issue(s) to delete?","options":"{{search}}","multi_select":true}},
+    {"id":"confirm","tool":"human_review","params":{"review_type":"delete","summary":"Delete issue(s): {{sel_issue.selected}}"}},
+    {"id":"del","tool":"jira_delete_issue","params":{"issue_key":"{{sel_issue.selected}}"}},
+    {"id":"done","tool":"direct_response","params":{"message":"Deleted: {{sel_issue.selected}}"}}
+  ]
+
+  If project key is already known (e.g. user says "delete tasks in FLAG"):
+  Skip sel_proj step, use project key directly in jql.
 
 ── GET ISSUE (jira_get_issue) ──
   Tool: jira_get_issue
@@ -768,6 +861,13 @@ Note: start_date and end_date are auto-filled by the executor. Do NOT ask for th
 ── REASSIGN ISSUE ──
   Reassign = same as Assign, but first confirm current assignee via jira_get_issue if needed.
   If user says "reassign FROM X TO Y" and issue_key is given → skip confirmation, go straight to assign.
+
+── USER ROLES / PROJECT MEMBERS ──
+  There is NO tool to fetch user roles. Use jira_get_assignable_users to list who can be assigned,
+  then answer with direct_response. Do NOT invent a tool like jira_get_user_roles_for_project.
+  Example:
+  [{"id":"u","tool":"jira_get_assignable_users","params":{"project_key":"FLAG"}},
+   {"id":"done","tool":"direct_response","params":{"message":"Members in FLAG:\n{{u}}\n\nRole information is not available via the current integration."}}]
 
 ── MOVE ISSUE TO SPRINT (jira_rank_backlog_issues or jira_update_issue) ──
   Preferred tool: look in AVAILABLE_MCP_TOOLS for jira_rank_backlog_issues or jira_move_issues_to_sprint.
@@ -1429,7 +1529,7 @@ def _salvage_partial_plan(content: str) -> list:
     n = len(content)
     while i < n:
         # Find start of next top-level object
-        if content[i] != '{':
+        if content[i] != "{":
             i += 1
             continue
         # Walk forward counting braces, respecting strings
@@ -1442,19 +1542,19 @@ def _salvage_partial_plan(content: str) -> list:
             ch = content[j]
             if esc:
                 esc = False
-            elif ch == '\\' and in_str:
+            elif ch == "\\" and in_str:
                 esc = True
             elif ch == '"':
                 in_str = not in_str
             elif not in_str:
-                if ch == '{':
+                if ch == "{":
                     depth += 1
-                elif ch == '}':
+                elif ch == "}":
                     depth -= 1
                     if depth == 0:
                         # Complete object found
                         try:
-                            obj = json.loads(content[start:j + 1])
+                            obj = json.loads(content[start : j + 1])
                             if isinstance(obj, dict) and "tool" in obj:
                                 if not isinstance(obj.get("success_criteria"), str):
                                     obj["success_criteria"] = "Step completed"
@@ -1480,23 +1580,23 @@ def _fix_json_control_chars(s: str) -> str:
         if escape_next:
             result.append(ch)
             escape_next = False
-        elif ch == '\\' and in_string:
+        elif ch == "\\" and in_string:
             result.append(ch)
             escape_next = True
         elif ch == '"':
             in_string = not in_string
             result.append(ch)
-        elif in_string and ch == '\n':
-            result.append('\\n')
-        elif in_string and ch == '\r':
-            result.append('\\r')
-        elif in_string and ch == '\t':
-            result.append('\\t')
+        elif in_string and ch == "\n":
+            result.append("\\n")
+        elif in_string and ch == "\r":
+            result.append("\\r")
+        elif in_string and ch == "\t":
+            result.append("\\t")
         elif in_string and ord(ch) < 0x20:
-            result.append(f'\\u{ord(ch):04x}')
+            result.append(f"\\u{ord(ch):04x}")
         else:
             result.append(ch)
-    return ''.join(result)
+    return "".join(result)
 
 
 import re as _re_fast
@@ -1508,7 +1608,7 @@ _FAST_JIRA_DIRECT: list[tuple] = [
     # "how many tickets/issues do I have" / "how many issues do we have" (personal or team)
     (
         _re_fast.compile(
-            r'\b(how many|count)\b.{0,40}\b(tickets?|issues?|tasks?|blockers?)\b.{0,40}\b(i have|do i have|do we have|are there|assigned to me|mine)\b',
+            r"\b(how many|count)\b.{0,40}\b(tickets?|issues?|tasks?|blockers?)\b.{0,40}\b(i have|do i have|do we have|are there|assigned to me|mine)\b",
             _re_fast.IGNORECASE,
         ),
         "assignee = currentUser() AND status != Done",
@@ -1518,7 +1618,7 @@ _FAST_JIRA_DIRECT: list[tuple] = [
     # "count my open issues" / "count my tickets" (no trailing clause)
     (
         _re_fast.compile(
-            r'\b(count|how many)\b.{0,15}\bmy\b.{0,25}\b(tickets?|issues?|tasks?)\b',
+            r"\b(count|how many)\b.{0,15}\bmy\b.{0,25}\b(tickets?|issues?|tasks?)\b",
             _re_fast.IGNORECASE,
         ),
         "assignee = currentUser() AND status != Done",
@@ -1528,7 +1628,7 @@ _FAST_JIRA_DIRECT: list[tuple] = [
     # "which (all) open tasks/issues do i have"
     (
         _re_fast.compile(
-            r'\bwhich\b.{0,30}\b(tasks?|issues?|tickets?)\b.{0,30}\b(i have|do i have)\b',
+            r"\bwhich\b.{0,30}\b(tasks?|issues?|tickets?)\b.{0,30}\b(i have|do i have)\b",
             _re_fast.IGNORECASE,
         ),
         "assignee = currentUser() AND status != Done ORDER BY updated DESC",
@@ -1538,7 +1638,7 @@ _FAST_JIRA_DIRECT: list[tuple] = [
     # "show/list/give me my tickets/issues" — all "my X" phrasings
     (
         _re_fast.compile(
-            r'\b(show|list|display|view|give\s+me|get\s+me|fetch)\b.{0,20}\bmy\b.{0,20}\b(open\s+)?(tickets?|issues?|tasks?)\b',
+            r"\b(show|list|display|view|give\s+me|get\s+me|fetch)\b.{0,20}\bmy\b.{0,20}\b(open\s+)?(tickets?|issues?|tasks?)\b",
             _re_fast.IGNORECASE,
         ),
         "assignee = currentUser() AND status != Done ORDER BY updated DESC",
@@ -1548,7 +1648,7 @@ _FAST_JIRA_DIRECT: list[tuple] = [
     # "what are my tasks / what's on my plate / what do i have"
     (
         _re_fast.compile(
-            r'\b(what\s+(are|is)\s+my|what.{0,10}i\s+(have|need\s+to)|what.{0,10}on\s+my\s+plate)\b.{0,20}\b(tickets?|issues?|tasks?|work|todo)?\b',
+            r"\b(what\s+(are|is)\s+my|what.{0,10}i\s+(have|need\s+to)|what.{0,10}on\s+my\s+plate)\b.{0,20}\b(tickets?|issues?|tasks?|work|todo)?\b",
             _re_fast.IGNORECASE,
         ),
         "assignee = currentUser() AND status != Done ORDER BY updated DESC",
@@ -1558,7 +1658,7 @@ _FAST_JIRA_DIRECT: list[tuple] = [
     # "show unassigned issues" — unassigned before type noun
     (
         _re_fast.compile(
-            r'\b(show|list|display|what|are there)\b.{0,20}\bunassigned\b.{0,20}\b(tickets?|issues?|tasks?)\b',
+            r"\b(show|list|display|what|are there)\b.{0,20}\bunassigned\b.{0,20}\b(tickets?|issues?|tasks?)\b",
             _re_fast.IGNORECASE,
         ),
         "assignee is EMPTY AND sprint in openSprints() AND status != Done",
@@ -1568,7 +1668,7 @@ _FAST_JIRA_DIRECT: list[tuple] = [
     # "what tasks are unassigned?" — type noun before unassigned
     (
         _re_fast.compile(
-            r'\b(tasks?|issues?|tickets?)\b.{0,25}\bare\s+unassigned\b',
+            r"\b(tasks?|issues?|tickets?)\b.{0,25}\bare\s+unassigned\b",
             _re_fast.IGNORECASE,
         ),
         "assignee is EMPTY AND sprint in openSprints() AND status != Done",
@@ -1580,15 +1680,17 @@ _FAST_JIRA_DIRECT: list[tuple] = [
 # Priority-filter fast paths (one per priority level)
 # Pattern uses s? so both "blocker" and "blockers" match.
 for _pri in ("Blocker", "Critical", "High", "Medium", "Low"):
-    _FAST_JIRA_DIRECT.append((
-        _re_fast.compile(
-            rf'\b(show|list|display|are\s+there)\b.{{0,25}}\b{_pri.lower()}s?\b.{{0,25}}\b(tickets?|issues?|tasks?|priority)?\b',
-            _re_fast.IGNORECASE,
-        ),
-        f"priority = {_pri} AND status != Done ORDER BY updated DESC",
-        f"{_pri} open issues:\n{{results}}",
-        25,
-    ))
+    _FAST_JIRA_DIRECT.append(
+        (
+            _re_fast.compile(
+                rf"\b(show|list|display|are\s+there)\b.{{0,25}}\b{_pri.lower()}s?\b.{{0,25}}\b(tickets?|issues?|tasks?|priority)?\b",
+                _re_fast.IGNORECASE,
+            ),
+            f"priority = {_pri} AND status != Done ORDER BY updated DESC",
+            f"{_pri} open issues:\n{{results}}",
+            25,
+        )
+    )
 
 # Status-filter fast paths
 _STATUS_MAP = {
@@ -1600,15 +1702,17 @@ _STATUS_MAP = {
     "backlog": "Backlog",
 }
 for _slug, _jira_status in _STATUS_MAP.items():
-    _FAST_JIRA_DIRECT.append((
-        _re_fast.compile(
-            rf'\b(show|list|display|what)\b.{{0,20}}\b({_slug.replace(" ", r"[- ]")})\b.{{0,20}}\b(tickets?|issues?|tasks?)?\b',
-            _re_fast.IGNORECASE,
-        ),
-        f'status = "{_jira_status}" AND sprint in openSprints() ORDER BY updated DESC',
-        f"{_jira_status} issues:\n{{results}}",
-        25,
-    ))
+    _FAST_JIRA_DIRECT.append(
+        (
+            _re_fast.compile(
+                rf"\b(show|list|display|what)\b.{{0,20}}\b({_slug.replace(' ', r'[- ]')})\b.{{0,20}}\b(tickets?|issues?|tasks?)?\b",
+                _re_fast.IGNORECASE,
+            ),
+            f'status = "{_jira_status}" AND sprint in openSprints() ORDER BY updated DESC',
+            f"{_jira_status} issues:\n{{results}}",
+            25,
+        )
+    )
 
 
 def _fast_jira_plan(task: str) -> list | None:
@@ -1645,8 +1749,8 @@ _FAST_GMAIL_READ: list[tuple] = [
     # "show my unread emails" / "any new emails?" / "any unread?"
     (
         _re_fast.compile(
-            r'\b(show|check|list|any|get|fetch|display)\b.{0,20}\bunread\b.{0,20}\b(emails?|messages?|mail)?\b'
-            r'|\bany\s+(new|unread)\s*(emails?|messages?|mail)?\b',
+            r"\b(show|check|list|any|get|fetch|display)\b.{0,20}\bunread\b.{0,20}\b(emails?|messages?|mail)?\b"
+            r"|\bany\s+(new|unread)\s*(emails?|messages?|mail)?\b",
             _re_fast.IGNORECASE,
         ),
         "is:unread in:inbox",
@@ -1655,8 +1759,8 @@ _FAST_GMAIL_READ: list[tuple] = [
     # "check my inbox" / "what's in my inbox"
     (
         _re_fast.compile(
-            r'\b(check|show|open|view|what.{0,10}in)\b.{0,15}\bmy\b.{0,10}\binbox\b'
-            r'|\bmy\s+inbox\b',
+            r"\b(check|show|open|view|what.{0,10}in)\b.{0,15}\bmy\b.{0,10}\binbox\b"
+            r"|\bmy\s+inbox\b",
             _re_fast.IGNORECASE,
         ),
         "in:inbox",
@@ -1665,7 +1769,7 @@ _FAST_GMAIL_READ: list[tuple] = [
     # "show my sent emails"
     (
         _re_fast.compile(
-            r'\b(show|list|display|get)\b.{0,15}\b(my\s+)?(sent|outbox)\b.{0,15}\b(emails?|messages?|mail)?\b',
+            r"\b(show|list|display|get)\b.{0,15}\b(my\s+)?(sent|outbox)\b.{0,15}\b(emails?|messages?|mail)?\b",
             _re_fast.IGNORECASE,
         ),
         "in:sent",
@@ -1674,7 +1778,7 @@ _FAST_GMAIL_READ: list[tuple] = [
     # "show starred emails"
     (
         _re_fast.compile(
-            r'\b(show|list|display|get)\b.{0,15}\bstarred\b.{0,15}\b(emails?|messages?|mail)?\b',
+            r"\b(show|list|display|get)\b.{0,15}\bstarred\b.{0,15}\b(emails?|messages?|mail)?\b",
             _re_fast.IGNORECASE,
         ),
         "is:starred",
@@ -1683,7 +1787,7 @@ _FAST_GMAIL_READ: list[tuple] = [
     # "show important emails"
     (
         _re_fast.compile(
-            r'\b(show|list|display|get)\b.{0,15}\bimportant\b.{0,15}\b(emails?|messages?|mail)?\b',
+            r"\b(show|list|display|get)\b.{0,15}\bimportant\b.{0,15}\b(emails?|messages?|mail)?\b",
             _re_fast.IGNORECASE,
         ),
         "is:important",
@@ -1692,8 +1796,8 @@ _FAST_GMAIL_READ: list[tuple] = [
     # "show emails with attachments"
     (
         _re_fast.compile(
-            r'\b(show|list|display|get|find)\b.{0,20}\b(emails?|messages?|mail)\b.{0,20}\battachment(s)?\b'
-            r'|\battachment(s)?\b.{0,20}\b(emails?|messages?|mail)\b',
+            r"\b(show|list|display|get|find)\b.{0,20}\b(emails?|messages?|mail)\b.{0,20}\battachment(s)?\b"
+            r"|\battachment(s)?\b.{0,20}\b(emails?|messages?|mail)\b",
             _re_fast.IGNORECASE,
         ),
         "has:attachment in:inbox",
@@ -1702,8 +1806,8 @@ _FAST_GMAIL_READ: list[tuple] = [
     # "show emails from today" / "show emails I sent today"
     (
         _re_fast.compile(
-            r'\b(show|list|get|check)\b.{0,20}\b(emails?|messages?|mail)\b.{0,20}\btoday\b'
-            r'|\btoday.{0,10}\b(emails?|messages?|mail)\b',
+            r"\b(show|list|get|check)\b.{0,20}\b(emails?|messages?|mail)\b.{0,20}\btoday\b"
+            r"|\btoday.{0,10}\b(emails?|messages?|mail)\b",
             _re_fast.IGNORECASE,
         ),
         "after:today in:inbox",
@@ -1712,7 +1816,7 @@ _FAST_GMAIL_READ: list[tuple] = [
     # "show spam" / "show emails in spam"
     (
         _re_fast.compile(
-            r'\b(show|list|check)\b.{0,20}\b(in\s+)?(spam|junk)\b',
+            r"\b(show|list|check)\b.{0,20}\b(in\s+)?(spam|junk)\b",
             _re_fast.IGNORECASE,
         ),
         "in:spam",
@@ -1731,7 +1835,7 @@ def _fast_gmail_plan(task: str) -> list | None:
     # Don't fast-path if task mentions a specific sender/subject — those need the LLM
     # to compose the right query string.
     _SPECIFIC_PATTERNS = _re_fast.compile(
-        r'\bfrom\b|\bsubject\b|\babout\b|\bregarding\b|\bsent by\b|\bby\b\s+[A-Z]',
+        r"\bfrom\b|\bsubject\b|\babout\b|\bregarding\b|\bsent by\b|\bby\b\s+[A-Z]",
         _re_fast.IGNORECASE,
     )
     if _SPECIFIC_PATTERNS.search(task):
@@ -1739,7 +1843,7 @@ def _fast_gmail_plan(task: str) -> list | None:
 
     # Don't fast-path send/reply/forward/draft actions
     _ACTION_PATTERNS = _re_fast.compile(
-        r'\b(send|reply|forward|draft|compose|write|respond|email\s+\w+@|ping\b|drop.{0,5}message)\b',
+        r"\b(send|reply|forward|draft|compose|write|respond|email\s+\w+@|ping\b|drop.{0,5}message)\b",
         _re_fast.IGNORECASE,
     )
     if _ACTION_PATTERNS.search(task):
@@ -1788,6 +1892,97 @@ async def planner_node(state: AgentState) -> dict:
 
     logger.info("[PLANNER] Planning task: %s", task[:100])
 
+    # ── Special case: "what's in the current sprint" ────────────────────────
+    import re as _re_sprint
+
+    if _re_sprint.search(
+        r"\b(what.?s|what.?is)\b.{0,20}\b(in|current)\b.{0,10}\bsprint\b",
+        task,
+        _re_sprint.IGNORECASE,
+    ):
+        logger.info("[PLANNER] Special case: current sprint query")
+        # This requires a multi-step workflow that the LLM planner gets wrong
+        sprint_plan = [
+            {
+                "id": "sel_proj",
+                "tool": "request_selection",
+                "description": "Select project to check sprints",
+                "params": {
+                    "question": "Which project do you want to check the current sprint for?",
+                    "options": "{{projects}}",  # This will be resolved from cached projects
+                    "multi_select": False,
+                },
+                "success_criteria": "Project selected",
+            },
+            {
+                "id": "get_boards",
+                "tool": "jira_get_agile_boards",
+                "description": "Get agile boards for selected project",
+                "params": {"project_key": "{{sel_proj.selected}}"},
+                "success_criteria": "Boards retrieved",
+            },
+            {
+                "id": "sel_board",
+                "tool": "request_selection",
+                "description": "Select board to check sprints",
+                "params": {
+                    "question": "Which board do you want to check?",
+                    "options": "{{get_boards}}",
+                    "multi_select": False,
+                },
+                "success_criteria": "Board selected",
+            },
+            {
+                "id": "get_sprints",
+                "tool": "jira_get_sprints_from_board",
+                "description": "Get sprints for selected board",
+                "params": {"board_id": "{{sel_board.selected}}"},
+                "success_criteria": "Sprints retrieved",
+            },
+            {
+                "id": "sel_sprint",
+                "tool": "request_selection",
+                "description": "Select which sprint to view",
+                "params": {
+                    "question": "Which sprint do you want to see issues for?",
+                    "options": "{{get_sprints}}",
+                    "multi_select": False,
+                },
+                "success_criteria": "Sprint selected",
+            },
+            {
+                "id": "get_issues",
+                "tool": "jira_get_sprint_issues",
+                "description": "Get issues in selected sprint",
+                "params": {"sprint_id": "{{sel_sprint.selected}}"},
+                "success_criteria": "Sprint issues retrieved",
+            },
+            {
+                "id": "response",
+                "tool": "direct_response",
+                "description": "Show sprint issues",
+                "params": {"message": "{{get_issues}}"},
+                "success_criteria": "Results displayed",
+            },
+        ]
+        cost = COST_PER_CALL["planner"]
+        return {
+            "plan": sprint_plan,
+            "current_step_index": 0,
+            "status": "executing",
+            "retry_count": 0,
+            "replan_count": state.get("replan_count", 0),
+            "steps_taken": state.get("steps_taken", 0),
+            "estimated_cost": state.get("estimated_cost", 0.0),
+            "step_results": [],
+            "flow_data": {},
+            "messages": [
+                AIMessage(
+                    content=f"Plan created with {len(sprint_plan)} steps. Starting execution..."
+                )
+            ],
+        }
+
     # ── Fast path: bypass LLM for simple Jira or Gmail queries ──────────────
     fast_plan = _fast_jira_plan(task) or _fast_gmail_plan(task)
     if fast_plan:
@@ -1803,33 +1998,49 @@ async def planner_node(state: AgentState) -> dict:
             "estimated_cost": state.get("estimated_cost", 0.0),  # no LLM cost
             "step_results": [],
             "flow_data": {},
-            "messages": [AIMessage(content=f"Plan created with {len(fast_plan)} steps. Starting execution...")],
+            "messages": [
+                AIMessage(
+                    content=f"Plan created with {len(fast_plan)} steps. Starting execution..."
+                )
+            ],
         }
 
     llm = get_planner_llm()
 
     # Inject configured sites so the planner knows what browser_login(site=?) accepts
     from dqe_agent.config import settings
+
     configured_sites = list(settings.sites.keys())
-    site_names = " | ".join(f'"{s}"' for s in configured_sites) if configured_sites else "(none configured)"
+    site_names = (
+        " | ".join(f'"{s}"' for s in configured_sites) if configured_sites else "(none configured)"
+    )
 
     from datetime import date as _date
+
     _today = _date.today().isoformat()  # e.g. 2026-04-18
 
     context_parts = [f"TASK: {task}"]
     context_parts.append(f"TODAY'S DATE: {_today}  (use this for any date-relative queries)")
 
-    context_parts.append(
-        f"CONFIGURED SITES (use these names with browser_login): [{site_names}]"
-    )
+    context_parts.append(f"CONFIGURED SITES (use these names with browser_login): [{site_names}]")
 
     # Inject MCP/non-browser tool names so planner knows what's available
     from dqe_agent.tools import list_tool_names
     from dqe_agent.config import settings as _settings
+
     _browser_tool_set = {
-        "browser_login", "browser_navigate", "browser_act", "browser_extract",
-        "browser_click", "browser_type", "browser_wait", "browser_snapshot",
-        "ask_user", "human_review", "ask_user_choice", "direct_response",
+        "browser_login",
+        "browser_navigate",
+        "browser_act",
+        "browser_extract",
+        "browser_click",
+        "browser_type",
+        "browser_wait",
+        "browser_snapshot",
+        "ask_user",
+        "human_review",
+        "ask_user_choice",
+        "direct_response",
         "request_selection",
     }
     if _settings.disable_browser_tools:
@@ -1850,6 +2061,7 @@ async def planner_node(state: AgentState) -> dict:
             # ── Slow path: build schema for all MCP tools (runs once) ────────
             _t0 = time.monotonic()
             from dqe_agent.tools import get_tool as _get_tool
+
             mcp_lines = []
             for t in mcp_tools:
                 try:
@@ -1857,7 +2069,11 @@ async def planner_node(state: AgentState) -> dict:
                     desc = tool_obj.description or ""
                     param_str = ""
                     try:
-                        schema = tool_obj.args_schema.model_json_schema() if hasattr(tool_obj, "args_schema") and tool_obj.args_schema else {}
+                        schema = (
+                            tool_obj.args_schema.model_json_schema()
+                            if hasattr(tool_obj, "args_schema") and tool_obj.args_schema
+                            else {}
+                        )
                         props = schema.get("properties", {})
                         required = set(schema.get("required", []))
                         if props:
@@ -1866,7 +2082,9 @@ async def planner_node(state: AgentState) -> dict:
                                 if p in ("kwargs", "ctx"):
                                     continue
                                 req = "*" if p in required else ""
-                                ptype = info.get("type", info.get("anyOf", [{}])[0].get("type", "any"))
+                                ptype = info.get(
+                                    "type", info.get("anyOf", [{}])[0].get("type", "any")
+                                )
                                 parts.append(f"{p}{req}: {ptype}")
                             param_str = f"({', '.join(parts)})"
                     except Exception:
@@ -1881,8 +2099,11 @@ async def planner_node(state: AgentState) -> dict:
                 + "\n".join(mcp_lines)
             )
             _MCP_DESC_CACHE[_tool_key] = mcp_block
-            logger.info("[PLANNER] MCP tool block built in %.0fms and cached (%d tools)",
-                        (time.monotonic() - _t0) * 1000, len(mcp_tools))
+            logger.info(
+                "[PLANNER] MCP tool block built in %.0fms and cached (%d tools)",
+                (time.monotonic() - _t0) * 1000,
+                len(mcp_tools),
+            )
             context_parts.append(mcp_block)
     else:
         context_parts.append("AVAILABLE_MCP_TOOLS: (none loaded yet)")
@@ -1895,6 +2116,7 @@ async def planner_node(state: AgentState) -> dict:
 
     # Inject agent's own notes from past diagnoses
     from dqe_agent.agent.notes import format_notes_for_prompt
+
     notes_text = format_notes_for_prompt()
     if notes_text:
         context_parts.append(notes_text)
@@ -1908,7 +2130,9 @@ async def planner_node(state: AgentState) -> dict:
     flow_data = state.get("flow_data", {})
     merged_data = {**known_data, **flow_data}
     if merged_data:
-        context_parts.append(f"AVAILABLE DATA (already known — do NOT ask the user for these): {json.dumps(merged_data, default=str)[:2000]}")
+        context_parts.append(
+            f"AVAILABLE DATA (already known — do NOT ask the user for these): {json.dumps(merged_data, default=str)[:2000]}"
+        )
 
     user_msg = "\n\n".join(context_parts)
 
@@ -1949,10 +2173,14 @@ async def planner_node(state: AgentState) -> dict:
                 history_msgs.append(AIMessage(content=str(content)[:400]))
 
     if history_msgs:
-        logger.debug("[PLANNER] Injecting %d prior context messages into LLM call", len(history_msgs))
+        logger.debug(
+            "[PLANNER] Injecting %d prior context messages into LLM call", len(history_msgs)
+        )
 
     # Final message list: system → history → current task
-    llm_messages = [SystemMessage(content=system_prompt)] + history_msgs + [HumanMessage(content=user_msg)]
+    llm_messages = (
+        [SystemMessage(content=system_prompt)] + history_msgs + [HumanMessage(content=user_msg)]
+    )
 
     response = await llm.ainvoke(llm_messages)
 
@@ -1962,10 +2190,10 @@ async def planner_node(state: AgentState) -> dict:
     content = response.content.strip()
     # Strip markdown code fences if present (handle leading whitespace before ```)
     if "```" in content:
-        content = content[content.index("```"):]
+        content = content[content.index("```") :]
         content = content.split("\n", 1)[-1]
         if "```" in content:
-            content = content[:content.rindex("```")]
+            content = content[: content.rindex("```")]
         content = content.strip()
 
     # Fix bare control characters inside JSON strings (common LLM bug)
@@ -1983,16 +2211,21 @@ async def planner_node(state: AgentState) -> dict:
         if not plan:
             logger.error("[PLANNER] Could not salvage plan — asking LLM to retry")
             # Retry once with a stricter prompt
-            repair_response = await llm.ainvoke([
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_msg + "\n\nCRITICAL: Output ONLY valid JSON array. No markdown fences, no explanation. Every string value must use \\n for newlines, never bare newlines."),
-            ])
+            repair_response = await llm.ainvoke(
+                [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(
+                        content=user_msg
+                        + "\n\nCRITICAL: Output ONLY valid JSON array. No markdown fences, no explanation. Every string value must use \\n for newlines, never bare newlines."
+                    ),
+                ]
+            )
             repair_content = repair_response.content.strip()
             if "```" in repair_content:
-                repair_content = repair_content[repair_content.index("```"):]
+                repair_content = repair_content[repair_content.index("```") :]
                 repair_content = repair_content.split("\n", 1)[-1]
                 if "```" in repair_content:
-                    repair_content = repair_content[:repair_content.rindex("```")]
+                    repair_content = repair_content[: repair_content.rindex("```")]
                 repair_content = repair_content.strip()
             repair_content = _fix_json_control_chars(repair_content)
             try:
@@ -2004,7 +2237,11 @@ async def planner_node(state: AgentState) -> dict:
                 return {
                     "status": "failed",
                     "error": f"Planner produced invalid JSON: {exc2}",
-                    "messages": [AIMessage(content="I couldn't generate a valid plan. Please try rephrasing your request.")],
+                    "messages": [
+                        AIMessage(
+                            content="I couldn't generate a valid plan. Please try rephrasing your request."
+                        )
+                    ],
                 }
 
     logger.info("[PLANNER] Generated %d-step plan in %.0fms", len(plan), duration)
@@ -2013,6 +2250,7 @@ async def planner_node(state: AgentState) -> dict:
 
     # Trace the planner LLM call
     from dqe_agent.observability import trace_llm_call
+
     trace_llm_call(
         model="planner",
         role="planner",
@@ -2033,5 +2271,7 @@ async def planner_node(state: AgentState) -> dict:
         # plan don't bleed into this one (e.g. board_id skipping the selection step).
         "step_results": [],
         "flow_data": {},
-        "messages": [AIMessage(content=f"Plan created with {len(plan)} steps. Starting execution...")],
+        "messages": [
+            AIMessage(content=f"Plan created with {len(plan)} steps. Starting execution...")
+        ],
     }

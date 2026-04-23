@@ -53,12 +53,26 @@ async def request_form(
         return "{}"
 
     cleaned_fields = []
+    _used_ids: set[str] = set()
     for f in fields:
         if not isinstance(f, dict):
             continue
+        raw_id = str(f.get("id") or f.get("field_id") or f.get("name") or "")
+        label_str = str(f.get("label") or f.get("name") or f.get("id") or "Field")
+        if not raw_id:
+            # Derive id from label: lowercase, spaces/special chars → underscore
+            import re as _re_id
+            raw_id = _re_id.sub(r'[^a-z0-9]+', '_', label_str.lower()).strip("_") or f"field_{len(cleaned_fields)}"
+        # Ensure uniqueness
+        base_id = raw_id
+        counter = 1
+        while raw_id in _used_ids:
+            raw_id = f"{base_id}_{counter}"
+            counter += 1
+        _used_ids.add(raw_id)
         field = {
-            "id": str(f.get("id", "")),
-            "label": str(f.get("label", f.get("id", "Field"))),
+            "id": raw_id,
+            "label": label_str,
             "type": str(f.get("type", "text")),
             "required": bool(f.get("required", True)),
         }

@@ -7,6 +7,7 @@ Priority order for browser steps (fastest → most expensive):
   1. Deterministic checks (URL, element visible, text present) — FREE
   2. AI screenshot verification — only if deterministic checks fail/unavailable
 """
+
 from __future__ import annotations
 
 import base64
@@ -21,8 +22,8 @@ from dqe_agent.state import AgentState
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 1   # retry once unchanged
-DIAGNOSE_AT = 1   # on retry_count == 1, ask LLM to diagnose and adapt
+MAX_RETRIES = 1  # retry once unchanged
+DIAGNOSE_AT = 1  # on retry_count == 1, ask LLM to diagnose and adapt
 MAX_REPLANS = 2
 
 VISION_VERIFY_PROMPT = """You are verifying a browser automation step. Look at the screenshot and answer:
@@ -35,19 +36,34 @@ Did this step succeed? Respond with EXACTLY one JSON:
 
 # Tools that control a real browser — only these get verified.
 _BROWSER_TOOLS = {
-    "browser_login", "browser_navigate", "browser_act", "browser_extract",
-    "browser_click", "browser_type", "browser_wait", "browser_snapshot",
+    "browser_login",
+    "browser_navigate",
+    "browser_act",
+    "browser_extract",
+    "browser_click",
+    "browser_type",
+    "browser_wait",
+    "browser_snapshot",
 }
 
 # Human-interaction tools — always auto-pass.
 _HUMAN_TOOLS = {
-    "ask_user", "human_review", "ask_user_choice",
-    "direct_response", "request_selection",
+    "ask_user",
+    "human_review",
+    "ask_user_choice",
+    "direct_response",
+    "request_selection",
 }
 
 
 async def verifier_node(state: AgentState) -> dict:
     """Verify the last executed step."""
+    # If the executor already set a terminal status (complete/failed), don't override it.
+    state_status = state.get("status")
+    if state_status in ("complete", "failed"):
+        logger.info("[VERIFIER] Terminal status '%s' — skipping verification", state_status)
+        return {}
+
     step_results = state.get("step_results", [])
     plan = state.get("plan", [])
     idx = state.get("current_step_index", 0)
@@ -64,14 +80,21 @@ async def verifier_node(state: AgentState) -> dict:
     step_id = last_result.get("step_id", "")
     tool_used = last_result.get("tool", "")
 
-    # ── Human-interaction tools: always advance ───────────────────────────────
+    # ── Human-interaction tools: always advance, BUT respect explicit rejection ─
     if tool_used in _HUMAN_TOOLS:
+        # For human_review, check if it was rejected (status 'rejected')
+        if tool_used == "human_review" and step_status == "rejected":
+            logger.warning("[VERIFIER] Human review rejected — stopping workflow")
+            return {
+                "status": "complete",
+                "messages": [AIMessage(content="Workflow stopped — user did not approve.")],
+            }
         logger.info("[VERIFIER] Step '%s' auto-passed (human tool)", step_id)
         return {"current_step_index": idx + 1, "retry_count": 0, "status": "executing"}
 
     # ── MCP / API tools: pass on success, fail on error — no retry ───────────
     if tool_used not in _BROWSER_TOOLS:
-        if step_status == "failed":
+        if step_status in ("failed", "partial"):
             error_msg = last_result.get("error", "unknown error")
             logger.warning("[VERIFIER] MCP tool '%s' failed: %s", tool_used, error_msg[:120])
             return {
@@ -124,7 +147,9 @@ async def verifier_node(state: AgentState) -> dict:
     return {"current_step_index": idx + 1, "retry_count": 0, "status": "executing"}
 
 
-async def _deterministic_verify(criteria: str, result: dict, state: AgentState) -> tuple[bool | None, str]:
+async def _deterministic_verify(
+    criteria: str, result: dict, state: AgentState
+) -> tuple[bool | None, str]:
     """Check success without using an LLM. Returns (True/False/None, reason)."""
     if not criteria:
         return None, "no criteria"
@@ -135,6 +160,7 @@ async def _deterministic_verify(criteria: str, result: dict, state: AgentState) 
     if "url contains" in criteria_lower or "url has" in criteria_lower:
         try:
             from dqe_agent.tools.browser_tools import _get_browser
+
             browser = _get_browser()
             if browser and browser.page:
                 fragment = ""
@@ -161,6 +187,7 @@ async def _deterministic_verify(criteria: str, result: dict, state: AgentState) 
     if "page text contains" in criteria_lower:
         try:
             from dqe_agent.tools.browser_tools import _get_browser
+
             browser = _get_browser()
             if browser and browser.page:
                 fragment = criteria_lower.split("page text contains")[-1].strip().strip("'\"")
@@ -177,7 +204,11 @@ async def _deterministic_verify(criteria: str, result: dict, state: AgentState) 
 
     if "json" in criteria_lower or "fields" in criteria_lower:
         try:
-            parsed = json.loads(result.get("result", "{}")) if isinstance(result.get("result"), str) else result.get("result", {})
+            parsed = (
+                json.loads(result.get("result", "{}"))
+                if isinstance(result.get("result"), str)
+                else result.get("result", {})
+            )
             if isinstance(parsed, dict) and len(parsed) > 0:
                 return True, f"Extracted {len(parsed)} fields"
         except (json.JSONDecodeError, TypeError):
@@ -194,6 +225,7 @@ async def _ai_verify(criteria: str, step: dict, result: dict) -> tuple[bool, str
         screenshot_b64 = None
         try:
             from dqe_agent.tools.browser_tools import _get_browser
+
             browser = _get_browser()
             if browser and browser.page:
                 raw = await browser.screenshot_bytes()
@@ -209,10 +241,17 @@ async def _ai_verify(criteria: str, step: dict, result: dict) -> tuple[bool, str
 
         msgs = [HumanMessage(content=prompt)]
         if screenshot_b64:
-            msgs = [HumanMessage(content=[
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
-            ])]
+            msgs = [
+                HumanMessage(
+                    content=[
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                        },
+                    ]
+                )
+            ]
 
         response = await llm.ainvoke(msgs)
         content = response.content.strip()
@@ -222,7 +261,10 @@ async def _ai_verify(criteria: str, step: dict, result: dict) -> tuple[bool, str
         parsed = json.loads(content)
 
         from dqe_agent.observability import trace_llm_call
-        trace_llm_call(model="verifier-vision", role="verifier", cost_usd=COST_PER_CALL.get("verifier", 0.001))
+
+        trace_llm_call(
+            model="verifier-vision", role="verifier", cost_usd=COST_PER_CALL.get("verifier", 0.001)
+        )
 
         return parsed.get("verified", False), parsed.get("reason", ""), COST_PER_CALL["verifier"]
 
@@ -242,11 +284,21 @@ async def _handle_browser_failure(state: AgentState, reason: str = "") -> dict:
 
     # Retry once unchanged
     if retry_count < DIAGNOSE_AT:
-        logger.info("[VERIFIER] Retrying browser step %d (attempt %d/%d): %s", idx, retry_count + 1, DIAGNOSE_AT, reason)
+        logger.info(
+            "[VERIFIER] Retrying browser step %d (attempt %d/%d): %s",
+            idx,
+            retry_count + 1,
+            DIAGNOSE_AT,
+            reason,
+        )
         return {
             "retry_count": retry_count + 1,
             "status": "executing",
-            "messages": [AIMessage(content=f"Step failed ({reason}), retrying ({retry_count+1}/{DIAGNOSE_AT})...")],
+            "messages": [
+                AIMessage(
+                    content=f"Step failed ({reason}), retrying ({retry_count + 1}/{DIAGNOSE_AT})..."
+                )
+            ],
         }
 
     # LLM screenshot diagnosis
@@ -255,18 +307,28 @@ async def _handle_browser_failure(state: AgentState, reason: str = "") -> dict:
 
     if adapted:
         new_plan = list(plan)
-        new_plan[idx] = {**step, "params": adapted["params"], "description": adapted.get("description", step_desc)}
+        new_plan[idx] = {
+            **step,
+            "params": adapted["params"],
+            "description": adapted.get("description", step_desc),
+        }
         logger.info("[VERIFIER] Adapted step %d: %s", idx, adapted.get("reasoning", "")[:120])
         return {
             "plan": new_plan,
             "retry_count": 0,
             "status": "executing",
-            "messages": [AIMessage(content=f"Diagnosed: {adapted.get('reasoning', '')} — trying adapted approach...")],
+            "messages": [
+                AIMessage(
+                    content=f"Diagnosed: {adapted.get('reasoning', '')} — trying adapted approach..."
+                )
+            ],
         }
 
     # Replan
     if replan_count < MAX_REPLANS:
-        logger.warning("[VERIFIER] Diagnosis inconclusive — replanning (%d/%d)", replan_count + 1, MAX_REPLANS)
+        logger.warning(
+            "[VERIFIER] Diagnosis inconclusive — replanning (%d/%d)", replan_count + 1, MAX_REPLANS
+        )
         flow_data = state.get("flow_data", {})
         completed = [p.get("id", "") for p in plan[:idx]]
         collected = {sid: flow_data[sid] for sid in completed if sid in flow_data}
@@ -283,6 +345,7 @@ async def _handle_browser_failure(state: AgentState, reason: str = "") -> dict:
         current_url = ""
         try:
             from dqe_agent.tools.browser_tools import _get_browser
+
             b = _get_browser()
             if b and b.page:
                 current_url = b.page.url
@@ -308,7 +371,9 @@ async def _handle_browser_failure(state: AgentState, reason: str = "") -> dict:
     return {
         "status": "failed",
         "error": f"Step '{step_desc}' failed after diagnosis and {MAX_REPLANS} replans: {reason}",
-        "messages": [AIMessage(content=f"Task failed: could not complete '{step_desc}' after all attempts.")],
+        "messages": [
+            AIMessage(content=f"Task failed: could not complete '{step_desc}' after all attempts.")
+        ],
     }
 
 
@@ -326,6 +391,7 @@ async def _diagnose_and_adapt(state: AgentState, failure_reason: str) -> dict | 
     current_url = ""
     try:
         from dqe_agent.tools.browser_tools import _get_browser
+
         browser = _get_browser()
         if browser and browser.page:
             current_url = browser.page.url
@@ -348,10 +414,10 @@ async def _diagnose_and_adapt(state: AgentState, failure_reason: str) -> dict | 
     prompt = f"""A browser automation step has failed twice. Look at the screenshot and page state, then tell me what is happening and how to fix it.
 
 FAILED STEP:
-  Tool: {step.get('tool')}
+  Tool: {step.get("tool")}
   Type: {step_type}
-  Description: {step.get('description')}
-  Current params: {json.dumps(step.get('params', {}), indent=2)}
+  Description: {step.get("description")}
+  Current params: {json.dumps(step.get("params", {}), indent=2)}
   Failure reason: {failure_reason}
 
 CURRENT PAGE STATE:
@@ -373,7 +439,12 @@ Respond with ONLY this JSON (no markdown):
         llm = get_vision_llm()
         msg_content: Any = [{"type": "text", "text": prompt}]
         if screenshot_b64:
-            msg_content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}})
+            msg_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                }
+            )
         response = await llm.ainvoke([HumanMessage(content=msg_content)])
         content = response.content.strip()
         if content.startswith("```"):

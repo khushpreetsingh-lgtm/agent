@@ -3,6 +3,7 @@
 Uses GPT-4o-mini (or equivalent) to map plan steps to actual tool calls.
 The executor doesn't think about WHAT to do — it just follows the plan.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,7 +31,9 @@ def _unwrap_mcp_result(raw: Any) -> Any:
     """
     if not isinstance(raw, list) or not raw:
         return raw
-    if all(isinstance(item, dict) and item.get("type") == "text" and "text" in item for item in raw):
+    if all(
+        isinstance(item, dict) and item.get("type") == "text" and "text" in item for item in raw
+    ):
         combined = "\n".join(item["text"] for item in raw)
         try:
             return json.loads(combined)
@@ -39,7 +42,9 @@ def _unwrap_mcp_result(raw: Any) -> Any:
     return raw
 
 
-def _step_message(idx: int, total: int, tool: str, status: str, error: str, params: dict, result: Any) -> str:
+def _step_message(
+    idx: int, total: int, tool: str, status: str, error: str, params: dict, result: Any
+) -> str:
     """Return a human-readable progress message for a single step."""
     prefix = f"Step {idx + 1}/{total}"
 
@@ -49,7 +54,9 @@ def _step_message(idx: int, total: int, tool: str, status: str, error: str, para
     if tool == "request_selection":
         q = params.get("question", "")
         try:
-            selected = json.loads(result).get("selected", result) if isinstance(result, str) else result
+            selected = (
+                json.loads(result).get("selected", result) if isinstance(result, str) else result
+            )
         except Exception:
             selected = result or ""
         return f"{prefix} Selected: {selected}" + (f" (for: {q})" if q else "")
@@ -91,29 +98,29 @@ def _no_results_sentence(prefix: str) -> str:
     # Strip common filler openers so we can inspect the subject
     for filler in ("here are your ", "here are the ", "your ", "the "):
         if p.startswith(filler):
-            p = p[len(filler):]
+            p = p[len(filler) :]
             break
     # Map common subjects to a natural sentence.
     # ORDER MATTERS — more specific entries must come before generic ones.
     _MAP = [
-        ("blocker",        "No blockers right now — all clear!"),
-        ("critical",       "No critical issues found."),
-        ("high priority",  "No high priority issues found."),
-        ("medium priority","No medium priority issues found."),
-        ("low priority",   "No low priority issues found."),
-        ("unassigned",     "No unassigned issues found in the sprint."),
-        ("in progress",    "Nothing is currently in progress."),
-        ("in review",      "Nothing is currently in review."),
-        ("to do",          "No items in To Do right now."),
-        ("testing",        "No issues are in testing right now."),
-        ("backlog",        "The backlog is empty."),
-        ("done",           "No issues marked as Done yet."),
-        ("open tasks",     "You don't have any open tasks right now."),
-        ("open issues",    "You don't have any open issues right now."),
-        ("open tickets",   "You don't have any open tickets right now."),
-        ("tasks",          "You don't have any tasks right now."),
-        ("issues",         "You don't have any issues right now."),
-        ("tickets",        "You don't have any tickets right now."),
+        ("blocker", "No blockers right now — all clear!"),
+        ("critical", "No critical issues found."),
+        ("high priority", "No high priority issues found."),
+        ("medium priority", "No medium priority issues found."),
+        ("low priority", "No low priority issues found."),
+        ("unassigned", "No unassigned issues found in the sprint."),
+        ("in progress", "Nothing is currently in progress."),
+        ("in review", "Nothing is currently in review."),
+        ("to do", "No items in To Do right now."),
+        ("testing", "No issues are in testing right now."),
+        ("backlog", "The backlog is empty."),
+        ("done", "No issues marked as Done yet."),
+        ("open tasks", "You don't have any open tasks right now."),
+        ("open issues", "You don't have any open issues right now."),
+        ("open tickets", "You don't have any open tickets right now."),
+        ("tasks", "You don't have any tasks right now."),
+        ("issues", "You don't have any issues right now."),
+        ("tickets", "You don't have any tickets right now."),
     ]
     for key, sentence in _MAP:
         if key in p:
@@ -164,12 +171,16 @@ def _format_result_for_display(raw: str) -> str:
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
-            key     = issue.get("key", "")
-            fields  = issue.get("fields", issue)
-            summary  = _str_field(fields, "summary") or _str_field(issue, "summary") or "(no summary)"
-            status   = _str_field(fields, "status")  or _str_field(issue, "status")
+            key = issue.get("key", "")
+            fields = issue.get("fields", issue)
+            summary = (
+                _str_field(fields, "summary") or _str_field(issue, "summary") or "(no summary)"
+            )
+            status = _str_field(fields, "status") or _str_field(issue, "status")
             priority = _str_field(fields, "priority") or _str_field(issue, "priority")
-            assignee = _str_field(fields, "assignee") or _str_field(issue, "assignee") or "Unassigned"
+            assignee = (
+                _str_field(fields, "assignee") or _str_field(issue, "assignee") or "Unassigned"
+            )
             issue_type = _str_field(fields, "issuetype") or _str_field(issue, "issuetype")
 
             # Line 1: key + summary
@@ -197,7 +208,12 @@ def _format_result_for_display(raw: str) -> str:
 
 def _build_completion_summary(step_results: list) -> str:
     """Build a rich human-readable summary of what was accomplished."""
-    _INTERACTION_TOOLS = {"request_selection", "ask_user", "human_review_request", "direct_response"}
+    _INTERACTION_TOOLS = {
+        "request_selection",
+        "ask_user",
+        "human_review_request",
+        "direct_response",
+    }
 
     # Collect user inputs and selections
     selections: dict[str, str] = {}
@@ -251,9 +267,16 @@ def _build_completion_summary(step_results: list) -> str:
 
     # Key fields from the primary result
     KEY_FIELDS = [
-        ("id", "ID"), ("key", "Key"), ("name", "Name"), ("summary", "Summary"),
-        ("sprintId", "Sprint ID"), ("boardId", "Board ID"), ("startDate", "Start Date"),
-        ("endDate", "End Date"), ("state", "State"), ("goal", "Goal"),
+        ("id", "ID"),
+        ("key", "Key"),
+        ("name", "Name"),
+        ("summary", "Summary"),
+        ("sprintId", "Sprint ID"),
+        ("boardId", "Board ID"),
+        ("startDate", "Start Date"),
+        ("endDate", "End Date"),
+        ("state", "State"),
+        ("goal", "Goal"),
         ("self", None),  # skip "self" (URL noise)
     ]
     shown: set[str] = set()
@@ -265,7 +288,11 @@ def _build_completion_summary(step_results: list) -> str:
             shown.add(field)
 
     # Remaining primary result fields (limit noise)
-    extras = [(k, v) for k, v in primary_result.items() if k not in shown and k not in ("self", "links", "_links")]
+    extras = [
+        (k, v)
+        for k, v in primary_result.items()
+        if k not in shown and k not in ("self", "links", "_links")
+    ]
     for k, v in extras[:6]:
         if isinstance(v, (dict, list)):
             continue
@@ -301,7 +328,13 @@ async def executor_node(state: AgentState) -> dict:
     params = step.get("params", {})
     description = step.get("description", "")
 
-    logger.info("[EXECUTOR] Step %d/%d: [%s] %s", idx + 1, len(plan), tool_name, description or "(no description)")
+    logger.info(
+        "[EXECUTOR] Step %d/%d: [%s] %s",
+        idx + 1,
+        len(plan),
+        tool_name,
+        description or "(no description)",
+    )
 
     # Ensure flow_data is available early — some direct_response paths
     # (replanning after MCP failures) inspect flow_data for user corrections.
@@ -346,9 +379,10 @@ async def executor_node(state: AgentState) -> dict:
                 # Message may embed a JSON blob mid-text — format any trailing JSON block
                 # e.g. "Your open tasks are: {...}"
                 import re as _re_inline
-                _m = _re_inline.search(r'(\{[\s\S]*\}|\[[\s\S]*\])\s*$', response_msg)
+
+                _m = _re_inline.search(r"(\{[\s\S]*\}|\[[\s\S]*\])\s*$", response_msg)
                 if _m:
-                    prefix = response_msg[:_m.start()].rstrip().rstrip(":").rstrip()
+                    prefix = response_msg[: _m.start()].rstrip().rstrip(":").rstrip()
                     formatted = _format_result_for_display(_m.group(1))
                     if formatted == "No issues found.":
                         # Merge prefix + empty result into one natural sentence
@@ -357,27 +391,42 @@ async def executor_node(state: AgentState) -> dict:
                         response_msg = f"{prefix}:\n\n{formatted}"
                     else:
                         response_msg = formatted
-            
+
             # --- Cleanup Gmail Search Output ---
-            if "Found " in response_msg and "📧 MESSAGES:" in response_msg and "Message ID:" in response_msg:
+            if (
+                "Found " in response_msg
+                and "📧 MESSAGES:" in response_msg
+                and "Message ID:" in response_msg
+            ):
                 import re
+
                 # Extract just the count part: "Found X messages matching 'query':"
                 header_match = re.search(r"(Found \d+ messages matching '[^']+':)", response_msg)
                 if header_match:
                     count_header = header_match.group(1)
                     # If it's a "how many" intent (no specific message asked for), just show the count.
                     # Or we can just strip out the ugly URLs and Thread IDs.
-                    response_msg = response_msg[:response_msg.find("📧 MESSAGES:")].strip()
-                    response_msg += f"\n(Run 'read my unread emails' if you want to interact with them)"
+                    response_msg = response_msg[: response_msg.find("📧 MESSAGES:")].strip()
+                    response_msg += (
+                        f"\n(Run 'read my unread emails' if you want to interact with them)"
+                    )
         else:
             response_msg = raw_msg
 
         return {
-            "step_results": state.get("step_results", []) + [{
-                "step_id": step_id, "step_index": idx, "tool": "direct_response",
-                "status": "success", "result": response_msg, "error": "",
-                "duration_ms": 0, "retries": 0,
-            }],
+            "step_results": state.get("step_results", [])
+            + [
+                {
+                    "step_id": step_id,
+                    "step_index": idx,
+                    "tool": "direct_response",
+                    "status": "success",
+                    "result": response_msg,
+                    "error": "",
+                    "duration_ms": 0,
+                    "retries": 0,
+                }
+            ],
             "steps_taken": steps_taken + 1,
             "estimated_cost": cost,
             "status": "verifying",
@@ -386,11 +435,14 @@ async def executor_node(state: AgentState) -> dict:
 
     # Check guardrails
     from dqe_agent.config import settings
+
     if steps_taken >= settings.max_steps:
         return {
             "status": "failed",
             "error": f"Max steps ({settings.max_steps}) reached",
-            "messages": [AIMessage(content=f"Stopped: reached {settings.max_steps}-step safety limit.")],
+            "messages": [
+                AIMessage(content=f"Stopped: reached {settings.max_steps}-step safety limit.")
+            ],
         }
 
     # Resolve template references in params using flow_data and step_results
@@ -413,10 +465,11 @@ async def executor_node(state: AgentState) -> dict:
         # try to extract the referenced field name (suffix) so we can match it
         # against any recent non-interaction step result that contains that key.
         import re as _re_temp
-        _templ_m = _re_temp.match(r'^\{\{(.+?)\}\}$', params["options"].strip())
+
+        _templ_m = _re_temp.match(r"^\{\{(.+?)\}\}$", params["options"].strip())
         _suffix = None
         if _templ_m and "." in _templ_m.group(1):
-            _suffix = _templ_m.group(1).split('.')[-1]
+            _suffix = _templ_m.group(1).split(".")[-1]
         for sr in reversed(step_results):
             if not isinstance(sr, dict):
                 continue
@@ -434,7 +487,12 @@ async def executor_node(state: AgentState) -> dict:
             # specific sub-field (e.g. 'boards'), prefer that sub-field when
             # it's present to better match templates that used different ids.
             items = []
-            if isinstance(raw, dict) and _suffix and _suffix in raw and isinstance(raw[_suffix], list):
+            if (
+                isinstance(raw, dict)
+                and _suffix
+                and _suffix in raw
+                and isinstance(raw[_suffix], list)
+            ):
                 items = raw[_suffix]
             else:
                 items = _extract_items_from_response(raw)
@@ -444,9 +502,85 @@ async def executor_node(state: AgentState) -> dict:
                 params["options"] = opts
                 logger.info(
                     "[EXECUTOR] Pre-resolved request_selection options: %d items from step '%s'",
-                    len(opts), sr.get("step_id", "?"),
+                    len(opts),
+                    sr.get("step_id", "?"),
                 )
                 break
+
+    # ── Pre-resolve request_form field options BEFORE template resolution ──────
+    # _resolve_params only handles top-level strings; it won't recurse into the
+    # nested field dicts.  Scan each field's options string for {{ref}} templates
+    # and resolve them the same way as request_selection.options above.
+    if tool_name == "request_form" and isinstance(params.get("fields"), list):
+        import re as _re_form
+
+        _pure_ref_form = _re_form.compile(r"^\{\{(.+?)\}\}$")
+        resolved_fields = []
+        for _field in params["fields"]:
+            if not isinstance(_field, dict):
+                resolved_fields.append(_field)
+                continue
+            _field = dict(_field)
+            _opts = _field.get("options")
+            if isinstance(_opts, str) and _opts.strip().startswith("<<"):
+                _resolved_pre = _resolve_prefetched_sentinel(_opts.strip())
+                if _resolved_pre:
+                    _field["options"] = _resolved_pre
+                    logger.info(
+                        "[EXECUTOR] Pre-resolved form field '%s' options from sentinel: %d items",
+                        _field.get("id", "?"),
+                        len(_resolved_pre),
+                    )
+            if isinstance(_opts, str) and "{{" in _opts:
+                _m = _pure_ref_form.match(_opts.strip())
+                if _m:
+                    _ref = _m.group(1).strip()
+                    _obj = _resolve_ref_to_object(_ref, flow_data, results_by_id)
+                    if _obj is None:
+                        # Fallback: scan recent non-interaction step results
+                        _suffix_f = _ref.split(".")[-1] if "." in _ref else None
+                        for sr in reversed(step_results):
+                            if not isinstance(sr, dict) or sr.get("tool") in _INTERACTION_TOOLS:
+                                continue
+                            if sr.get("status") != "success":
+                                continue
+                            _raw = sr.get("result", "")
+                            if isinstance(_raw, str):
+                                try:
+                                    _raw = json.loads(_raw)
+                                except (json.JSONDecodeError, TypeError):
+                                    continue
+                            if (
+                                isinstance(_raw, dict)
+                                and _suffix_f
+                                and _suffix_f in _raw
+                                and isinstance(_raw[_suffix_f], list)
+                            ):
+                                _obj = _raw[_suffix_f]
+                            else:
+                                _obj = _extract_items_from_response(_raw)
+                            if _obj:
+                                break
+                    if _obj is not None:
+                        _field["options"] = (
+                            _items_to_options(_obj)
+                            if not (
+                                isinstance(_obj, list)
+                                and _obj
+                                and isinstance(_obj[0], dict)
+                                and "value" in _obj[0]
+                                and "label" in _obj[0]
+                            )
+                            else _obj
+                        )
+                        logger.info(
+                            "[EXECUTOR] Pre-resolved form field '%s' options: %d items",
+                            _field.get("id", "?"),
+                            len(_field["options"]),
+                        )
+            resolved_fields.append(_field)
+        params = dict(params)
+        params["fields"] = resolved_fields
 
     resolved_params = _resolve_params(params, flow_data, results_by_id)
 
@@ -457,12 +591,116 @@ async def executor_node(state: AgentState) -> dict:
     # Warn about params that still contain unresolved {{}} templates
     _unresolved = [k for k, v in resolved_params.items() if isinstance(v, str) and "{{" in v]
     if _unresolved:
-        logger.warning("[EXECUTOR] Unresolved template params for step '%s': %s", step_id, _unresolved)
+        logger.warning(
+            "[EXECUTOR] Unresolved template params for step '%s': %s", step_id, _unresolved
+        )
 
-    logger.debug("[EXECUTOR] Resolved params for '%s': %s", step_id, resolved_params)
+    logger.info(
+        "[EXECUTOR] Resolved params for '%s': %s",
+        step_id,
+        json.dumps(resolved_params, default=str)[:500],
+    )
 
     # Tool-specific param normalization (pass context so recovery can scan step results)
     resolved_params = _normalize_tool_params(tool_name, resolved_params, flow_data, results_by_id)
+
+    # Special handling for jira_delete_issue with multiple issue keys
+    if tool_name == "jira_delete_issue" and "issue_key" in resolved_params:
+        issue_key_param = resolved_params["issue_key"]
+        if isinstance(issue_key_param, str):
+            try:
+                # Try to parse as JSON array
+                parsed_keys = json.loads(issue_key_param)
+                if isinstance(parsed_keys, list):
+                    if len(parsed_keys) > 1:
+                        logger.info(
+                            "[EXECUTOR] jira_delete_issue: detected %d issue keys, processing individually",
+                            len(parsed_keys),
+                        )
+
+                        # Execute multiple delete operations
+                        start = time.time()
+                        results = []
+                        errors = []
+
+                        for issue_key in parsed_keys:
+                            single_params = resolved_params.copy()
+                            # Recover full Jira key (e.g. "FLAG-148756") from numeric ID if needed
+                            single_params["issue_key"] = _recover_jira_issue_key(
+                                issue_key, flow_data, results_by_id
+                            )
+                            try:
+                                tool = get_tool(tool_name)
+                                if tool is None:
+                                    raise ValueError(f"Tool '{tool_name}' not found")
+
+                                result_raw = await tool.ainvoke(single_params)
+                                result_raw = _unwrap_mcp_result(result_raw)
+                                results.append(f"Deleted {issue_key}: {str(result_raw)}")
+                            except Exception as exc:
+                                import traceback as _tb
+
+                                tb_str = "".join(
+                                    _tb.format_exception(type(exc), exc, exc.__traceback__)
+                                )
+                                error_msg = f"Failed to delete {issue_key}: {str(exc)}\nTraceback:\n{tb_str}"
+                                logger.error(
+                                    "[EXECUTOR] Delete failed for %s: %s\n%s",
+                                    issue_key,
+                                    str(exc),
+                                    tb_str,
+                                )
+                                errors.append(error_msg)
+
+                        duration_ms = int((time.time() - start) * 1000)
+                        all_results = results + errors
+                        combined_result = "; ".join(all_results)
+
+                        # Return combined result
+                        step_result = {
+                            "step_id": step_id,
+                            "step_index": idx,
+                            "tool": tool_name,
+                            "status": "success" if not errors else "partial",
+                            "result": combined_result,
+                            "error": "; ".join(errors) if errors else "",
+                            "duration_ms": duration_ms,
+                            "retries": 0,
+                        }
+
+                        return {
+                            "step_results": state.get("step_results", []) + [step_result],
+                            "steps_taken": steps_taken + 1,
+                            "estimated_cost": cost,
+                            "status": "verifying",
+                            "flow_data": dict(state.get("flow_data", {})),
+                            "messages": [
+                                AIMessage(
+                                    content=f"Delete operation completed: {len(results)} successful, {len(errors)} failed"
+                                )
+                            ],
+                        }
+                    elif len(parsed_keys) == 1:
+                        # Single item from JSON array: extract it and recover full key if needed
+                        recovered = _recover_jira_issue_key(
+                            parsed_keys[0], flow_data, results_by_id
+                        )
+                        logger.info(
+                            "[EXECUTOR] jira_delete_issue: extracted single issue key %r → %r",
+                            parsed_keys[0],
+                            recovered,
+                        )
+                        resolved_params["issue_key"] = recovered
+            except (json.JSONDecodeError, TypeError):
+                # Not a JSON array — recover key for plain string too
+                recovered = _recover_jira_issue_key(issue_key_param, flow_data, results_by_id)
+                if recovered != issue_key_param:
+                    logger.info(
+                        "[EXECUTOR] jira_delete_issue: recovered issue key %r → %r",
+                        issue_key_param,
+                        recovered,
+                    )
+                    resolved_params["issue_key"] = recovered
 
     # Execute the tool directly
     start = time.time()
@@ -474,11 +712,37 @@ async def executor_node(state: AgentState) -> dict:
         tool = get_tool(tool_name)
         if tool is None:
             raise ValueError(f"Tool '{tool_name}' not found")
+    except KeyError:
+        # Tool doesn't exist — return a graceful direct response instead of failing the task.
+        logger.warning("[EXECUTOR] Tool '%s' not found — responding gracefully", tool_name)
+        msg = f"I don't have a tool to perform '{tool_name.replace('_', ' ')}' directly. I'll answer based on available information."
+        return {
+            "step_results": state.get("step_results", [])
+            + [
+                {
+                    "step_id": step_id,
+                    "step_index": idx,
+                    "tool": "direct_response",
+                    "status": "success",
+                    "result": msg,
+                    "error": "",
+                    "duration_ms": 0,
+                    "retries": 0,
+                }
+            ],
+            "steps_taken": steps_taken + 1,
+            "estimated_cost": cost,
+            "status": "verifying",
+            "flow_data": dict(state.get("flow_data", {})),
+            "messages": [AIMessage(content=msg)],
+        }
 
+    try:
         result_raw = await tool.ainvoke(resolved_params)
         # Unwrap LangChain MCP content blocks so downstream code (pre-resolve,
         # flow_data storage, template resolution) always sees real JSON-serialisable data.
         result_raw = _unwrap_mcp_result(result_raw)
+
         def _serialize(obj):
             if hasattr(obj, "model_dump"):
                 return obj.model_dump()
@@ -488,18 +752,32 @@ async def executor_node(state: AgentState) -> dict:
             # If human_review came back rejected, abort remaining steps
             hr = result_raw.get("human_review")
             if hr is not None and hasattr(hr, "approved") and not hr.approved:
-                logger.info("[EXECUTOR] Human review rejected at step %s — stopping workflow", step_id)
+                logger.info(
+                    "[EXECUTOR] Human review rejected at step %s — stopping workflow", step_id
+                )
                 return {
                     "status": "complete",
-                    "step_results": state.get("step_results", []) + [{
-                        "step_id": step_id, "step_index": idx, "tool": tool_name,
-                        "status": "rejected", "result": "User rejected — workflow stopped",
-                        "error": "", "duration_ms": 0, "retries": 0,
-                    }],
+                    "step_results": state.get("step_results", [])
+                    + [
+                        {
+                            "step_id": step_id,
+                            "step_index": idx,
+                            "tool": tool_name,
+                            "status": "rejected",
+                            "result": "User rejected — workflow stopped",
+                            "error": "",
+                            "duration_ms": 0,
+                            "retries": 0,
+                        }
+                    ],
                     "steps_taken": steps_taken + 1,
                     "estimated_cost": cost,
                     "flow_data": dict(state.get("flow_data", {})),
-                    "messages": [AIMessage(content=f"Workflow stopped at step '{step_id}' — user did not approve.")],
+                    "messages": [
+                        AIMessage(
+                            content=f"Workflow stopped at step '{step_id}' — user did not approve."
+                        )
+                    ],
                 }
             # Serialize — Pydantic models (e.g. HumanReview) need model_dump() first
             result = json.dumps(result_raw, default=_serialize)
@@ -521,14 +799,16 @@ async def executor_node(state: AgentState) -> dict:
 
     except Exception as exc:
         status = "failed"
-        error_msg = str(exc)
-        logger.error("[EXECUTOR] Step %s failed: %s", step_id, error_msg)
+        cause = exc.__cause__ or exc.__context__
+        error_msg = str(exc) + (f" — caused by: {cause}" if cause else "")
+        logger.error("[EXECUTOR] Step %s failed: %s", step_id, error_msg, exc_info=True)
 
     duration = (time.time() - start) * 1000
     step_cost = COST_PER_CALL.get("executor", 0.002)
 
     # Trace the tool execution
     from dqe_agent.observability import trace_tool_call
+
     trace_tool_call(
         tool=tool_name,
         args=resolved_params,
@@ -556,13 +836,23 @@ async def executor_node(state: AgentState) -> dict:
             if isinstance(parsed, dict):
                 merged_flow[step_id] = parsed
             elif isinstance(parsed, list):
-                # Wrap lists so template references like {{step._items}} and
-                # the whole list is accessible to _resolve_ref_to_object.
-                merged_flow[step_id] = {"_items": parsed, "_list": parsed}
+                # Wrap lists so template references like {{step._items}} work.
+                # Also hoist commonly-accessed fields to the top level.
+                wrapped = {"_items": parsed, "_list": parsed}
+                # For jira_create_issue: hoist key/id so {{step.key}} resolves
+                if tool_name in ("jira_create_issue", "create_issue") and parsed:
+                    _issue = parsed[0].get("issue", {}) if isinstance(parsed[0], dict) else {}
+                    if isinstance(_issue, dict):
+                        for _k in ("key", "id", "summary"):
+                            if _issue.get(_k):
+                                wrapped[_k] = _issue[_k]
+                merged_flow[step_id] = wrapped
         except (json.JSONDecodeError, TypeError):
             pass
 
-    msg_content = _step_message(idx, len(plan), tool_name, status, error_msg, resolved_params, result)
+    msg_content = _step_message(
+        idx, len(plan), tool_name, status, error_msg, resolved_params, result
+    )
 
     return {
         "step_results": state.get("step_results", []) + [step_result],
@@ -572,6 +862,34 @@ async def executor_node(state: AgentState) -> dict:
         "flow_data": merged_flow,
         "messages": [AIMessage(content=msg_content)],
     }
+
+
+def _resolve_prefetched_sentinel(sentinel: str) -> list | None:
+    """Resolve <<SENTINEL>> tokens injected by the planner into actual option lists."""
+    s = sentinel.strip()
+    if s == "<<JIRA_PROJECTS_PREFETCHED>>":
+        try:
+            from dqe_agent.agent.planner import _cache_get
+
+            return _cache_get("jira_projects")
+        except Exception:
+            return None
+    return None
+
+
+def _first_project_key() -> str:
+    """Return the first Jira project key from planner cache (used before user picks a project)."""
+    try:
+        from dqe_agent.agent.planner import _cache_get
+
+        projects = _cache_get("jira_projects")
+        if projects and isinstance(projects, list) and projects:
+            first = projects[0]
+            if isinstance(first, dict):
+                return str(first.get("value") or first.get("key") or "")
+    except Exception:
+        pass
+    return ""
 
 
 def _extract_ask_user_answer(step_result: dict) -> str:
@@ -591,6 +909,7 @@ def _items_to_options(items: list) -> list[dict[str, str]]:
     """Convert a list of arbitrary objects into [{value, label}] for request_selection.
 
     Handles Jira boards, sprints, projects, users, and any generic id/name dicts.
+    Prefers 'key' (Jira issue/project key) over numeric 'id' when both exist.
     """
     options: list[dict[str, str]] = []
     for item in items:
@@ -603,7 +922,9 @@ def _items_to_options(items: list) -> list[dict[str, str]]:
             options.append({"value": str(item["value"]), "label": str(item["label"])})
             continue
         # Jira board / sprint / Google Calendar: {id, name/displayName/summary, type/state}
-        item_id = str(item.get("id", item.get("boardId", item.get("key", "")))).strip()
+        # For Jira issues and projects, prefer the 'key' field (e.g. 'FLAG-123') over numeric 'id'.
+        # Boards/sprints have 'boardId' or 'id' but not 'key'.
+        item_id = str(item.get("key", item.get("boardId", item.get("id", "")))).strip()
         name = str(item.get("name", item.get("displayName", item.get("summary", item_id)))).strip()
         extra = item.get("type") or item.get("state") or item.get("projectTypeKey") or ""
         label = f"{name} ({extra})" if extra else name
@@ -620,8 +941,18 @@ def _extract_items_from_response(raw: Any) -> list:
         return raw
     if isinstance(raw, dict):
         # Try common wrapper keys
-        for k in ("values", "boards", "sprints", "items", "data",
-                  "results", "issues", "projects", "_items", "_list"):
+        for k in (
+            "values",
+            "boards",
+            "sprints",
+            "items",
+            "data",
+            "results",
+            "issues",
+            "projects",
+            "_items",
+            "_list",
+        ):
             if k in raw and isinstance(raw[k], list):
                 return raw[k]
         # Single-object dict — wrap it
@@ -638,18 +969,21 @@ def _strip_invalid_params(tool_name: str, params: dict) -> dict:
     Falls back to the original params if the schema cannot be read.
     """
     from dqe_agent.tools import get_tool as _get_tool
+
     try:
         tool_obj = _get_tool(tool_name)
     except KeyError:
         return params
     if tool_obj is None:
         return params
-    
+
     # HARDCODED FIXES for known persistent hallucinations
     if tool_name == "search_gmail_messages":
         # search_gmail_messages ONLY supports 'query'
         if "limit" in params:
-            logger.warning("[EXECUTOR] Stripping persistent hallucinated 'limit' from search_gmail_messages")
+            logger.warning(
+                "[EXECUTOR] Stripping persistent hallucinated 'limit' from search_gmail_messages"
+            )
             params = {k: v for k, v in params.items() if k != "limit"}
 
     try:
@@ -661,7 +995,7 @@ def _strip_invalid_params(tool_name: str, params: dict) -> dict:
 
         props = schema.get("properties", {})
         valid = set(props.keys()) - {"ctx", "kwargs"}
-        
+
         if not valid:
             # If no properties found but schema exists, check if it's a root type (rare)
             return params
@@ -670,7 +1004,9 @@ def _strip_invalid_params(tool_name: str, params: dict) -> dict:
         if invalid:
             logger.warning(
                 "[EXECUTOR] '%s': stripping unknown params %s (valid keys: %s)",
-                tool_name, invalid, list(valid),
+                tool_name,
+                invalid,
+                list(valid),
             )
             params = {k: v for k, v in params.items() if k in valid}
     except Exception as e:
@@ -694,29 +1030,35 @@ def _pre_strip_remap(tool_name: str, params: dict) -> dict:
             if alias in params and "summary" not in params:
                 params["summary"] = params.pop(alias)
                 break
-        for alias in ("start", "start_datetime", "start_date", "date_start",
-                      "start_at", "begins_at"):
+        for alias in (
+            "start",
+            "start_datetime",
+            "start_date",
+            "date_start",
+            "start_at",
+            "begins_at",
+        ):
             if alias in params and "start_time" not in params:
                 params["start_time"] = params.pop(alias)
                 break
-        for alias in ("end", "end_datetime", "end_date", "date_end",
-                      "end_at", "ends_at"):
+        for alias in ("end", "end_datetime", "end_date", "date_end", "end_at", "ends_at"):
             if alias in params and "end_time" not in params:
                 params["end_time"] = params.pop(alias)
                 break
 
     # ── get_events / list_events: fix wrong time param names ─────────────────
     _CALENDAR_QUERY_TOOLS = {
-        "get_events", "list_events", "calendar_get_events", "calendar_list_events",
+        "get_events",
+        "list_events",
+        "calendar_get_events",
+        "calendar_list_events",
     }
     if tool_name in _CALENDAR_QUERY_TOOLS:
-        for alias in ("start_datetime", "start_date", "start", "date_start",
-                      "from_date", "from"):
+        for alias in ("start_datetime", "start_date", "start", "date_start", "from_date", "from"):
             if alias in params and "time_min" not in params:
                 params["time_min"] = params.pop(alias)
                 break
-        for alias in ("end_datetime", "end_date", "end", "date_end",
-                      "to_date", "to"):
+        for alias in ("end_datetime", "end_date", "end", "date_end", "to_date", "to"):
             if alias in params and "time_max" not in params:
                 params["time_max"] = params.pop(alias)
                 break
@@ -732,9 +1074,12 @@ def _pre_strip_remap(tool_name: str, params: dict) -> dict:
             if alias in params and "issue_key" not in params:
                 params["issue_key"] = params.pop(alias)
                 break
-        # If fields is a dict, convert to JSON string (tool expects str)
-        if isinstance(params.get("fields"), dict):
-            params["fields"] = json.dumps(params["fields"])
+        # fields MUST be a dict — never convert to JSON string
+        if isinstance(params.get("fields"), str):
+            try:
+                params["fields"] = json.loads(params["fields"])
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     # ── get_issue / jira_get_issue: issue_id → issue_key ─────────────────────
     if tool_name in ("get_issue", "jira_get_issue"):
@@ -761,6 +1106,79 @@ def _pre_strip_remap(tool_name: str, params: dict) -> dict:
     return params
 
 
+def _recover_jira_issue_key(issue_key: str, flow_data: dict, results_by_id: dict) -> str:
+    """Recover the full Jira issue key (e.g. 'FLAG-148756') from a numeric ID.
+
+    The jira_search tool returns issues with both an 'id' (numeric DB id) and
+    a 'key' (e.g. 'FLAG-148756'). The request_selection options use the 'id'
+    as the value by default, but jira_delete_issue requires the full key.
+    This helper looks up the cached search results to map the numeric ID back
+    to the full key.
+    """
+    # Already looks like a full key (e.g. "FLAG-123")?
+    import re as _re_issue
+
+    if _re_issue.match(r"^[A-Z][A-Z0-9]+-\d+$", issue_key.strip()):
+        return issue_key
+
+    # Try to interpret as a numeric ID
+    try:
+        numeric_id = int(issue_key.strip())
+    except (ValueError, AttributeError):
+        return issue_key  # not numeric, return as-is
+
+    # Search cached step results (results_by_id → flow_data)
+    for container in (results_by_id, flow_data):
+        for step_id, step_result in container.items():
+            # In results_by_id, step_result is a dict with a "result" field.
+            # In flow_data, step_result is the raw object itself.
+            if isinstance(step_result, dict) and "result" in step_result:
+                raw = step_result.get("result", "")
+            else:
+                raw = step_result
+
+            # Parse JSON if needed
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+            # Extract list of issues from common wrapper keys
+            issues: list = []
+            if isinstance(raw, dict):
+                for k in ("issues", "items", "data", "results", "_items", "_list"):
+                    if k in raw and isinstance(raw[k], list):
+                        issues = raw[k]
+                        break
+                else:
+                    # Single issue object?
+                    if "key" in raw and "fields" in raw:
+                        issues = [raw]
+            elif isinstance(raw, list):
+                issues = raw
+
+            # Scan for matching issue
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    continue
+                # Match by numeric 'id'
+                issue_id = issue.get("id")
+                if isinstance(issue_id, (int, float)) and int(issue_id) == numeric_id:
+                    full_key = issue.get("key")
+                    if isinstance(full_key, str) and full_key.strip():
+                        return full_key
+                # Also match by suffix of 'key' (e.g. key="FLAG-148756" ends with "148756")
+                key_str = issue.get("key", "")
+                if isinstance(key_str, str):
+                    m = _re_issue.search(r"-(\d+)$", key_str)
+                    if m and int(m.group(1)) == numeric_id:
+                        return key_str
+
+    # No match found — return original
+    return issue_key
+
+
 def _normalize_tool_params(
     tool_name: str,
     params: dict,
@@ -781,20 +1199,52 @@ def _normalize_tool_params(
 
     # ── request_selection: ensure options is a proper [{value,label}] list ──
     if tool_name == "request_selection":
+        # ── RULE: always allow multi-select when the user picks issues to delete ──
+        # The LLM sometimes incorrectly sets multi_select=false for single-issue deletion
+        # phrasing ("Which issue do you want to delete?"). Deletion must ALWAYS permit
+        # selecting multiple issues because a user may want to delete more than one.
+        # Override any false value if the question clearly references deletion.
+        q_raw = params.get("question", "")
+        if isinstance(q_raw, str):
+            q_lower = q_raw.lower()
+            if ("delete" in q_lower or "remove" in q_lower) and params.get("multi_select") is False:
+                logger.info(
+                    "[EXECUTOR] request_selection: forcing multi_select=True for deletion question: %r",
+                    q_raw[:80],
+                )
+                params["multi_select"] = True
+
+        # Step 0: resolve <<SENTINEL>> tokens from planner cache
 
         def _is_valid_options(v: Any) -> bool:
             """True only if v is already a non-empty [{value,label}] list."""
             return (
-                isinstance(v, list) and bool(v) and
-                isinstance(v[0], dict) and "value" in v[0] and "label" in v[0]
+                isinstance(v, list)
+                and bool(v)
+                and isinstance(v[0], dict)
+                and "value" in v[0]
+                and "label" in v[0]
             )
 
         opts = params.get("options")
 
+        # Step 0: resolve <<SENTINEL>> tokens from planner cache
+        if isinstance(opts, str) and opts.strip().startswith("<<"):
+            _sentinel_resolved = _resolve_prefetched_sentinel(opts.strip())
+            if _sentinel_resolved:
+                params["options"] = _sentinel_resolved
+                opts = _sentinel_resolved
+                logger.info(
+                    "[EXECUTOR] request_selection: resolved sentinel %r → %d items",
+                    opts,
+                    len(_sentinel_resolved),
+                )
+
         # Step 1: string → try to resolve to actual object
         if isinstance(opts, str):
             import re as _re
-            m = _re.match(r'^\{\{(.+?)\}\}$', opts.strip())
+
+            m = _re.match(r"^\{\{(.+?)\}\}$", opts.strip())
             raw = None
             if m:
                 ref = m.group(1).strip()
@@ -815,7 +1265,8 @@ def _normalize_tool_params(
                     params["options"] = transformed
                     logger.info(
                         "[EXECUTOR] request_selection: resolved %d options from template %r",
-                        len(transformed), opts,
+                        len(transformed),
+                        opts,
                     )
                     opts = transformed
 
@@ -838,7 +1289,8 @@ def _normalize_tool_params(
                 if transformed:  # use any non-empty list
                     logger.warning(
                         "[EXECUTOR] request_selection: fallback — using %d items from step '%s'",
-                        len(transformed), sid,
+                        len(transformed),
+                        sid,
                     )
                     params["options"] = transformed
                     break
@@ -850,15 +1302,22 @@ def _normalize_tool_params(
     # After stripping invalid params above, re-inject project_key if the tool
     # accepts it and we already have the key from a prior selection step.
     _JIRA_LIST_TOOLS = {
-        "jira_get_agile_boards", "jira_get_boards", "jira_list_boards",
-        "jira_get_sprints", "jira_list_sprints", "jira_get_active_sprints",
-        "jira_get_issues_in_project", "jira_search_issues",
+        "jira_get_agile_boards",
+        "jira_get_boards",
+        "jira_list_boards",
+        "jira_get_sprints",
+        "jira_list_sprints",
+        "jira_get_active_sprints",
+        "jira_get_issues_in_project",
+        "jira_search_issues",
     }
     if tool_name in _JIRA_LIST_TOOLS and not params.get("project_key"):
         import re as _re2
-        _key_pat2 = _re2.compile(r'^[A-Z][A-Z0-9]{1,9}$')
+
+        _key_pat2 = _re2.compile(r"^[A-Z][A-Z0-9]{1,9}$")
         recovered_key = _find_selected_value(
-            results_by_id, flow_data,
+            results_by_id,
+            flow_data,
             priority_words=["select", "project", "key"],
             validate=lambda v: bool(_key_pat2.match(v.strip().upper())),
             transform=lambda v: v.strip().upper(),
@@ -866,14 +1325,20 @@ def _normalize_tool_params(
         if recovered_key:
             # Only inject if the tool schema actually has this param
             from dqe_agent.tools import get_tool as _gt
+
             _to = _gt(tool_name)
             if _to:
                 try:
-                    _schema = _to.args_schema.model_json_schema() if hasattr(_to, "args_schema") and _to.args_schema else {}
+                    _schema = (
+                        _to.args_schema.model_json_schema()
+                        if hasattr(_to, "args_schema") and _to.args_schema
+                        else {}
+                    )
                     if "project_key" in _schema.get("properties", {}):
                         logger.info(
                             "[EXECUTOR] '%s': injecting project_key=%r from prior selection",
-                            tool_name, recovered_key,
+                            tool_name,
+                            recovered_key,
                         )
                         params["project_key"] = recovered_key
                 except Exception:
@@ -884,6 +1349,7 @@ def _normalize_tool_params(
         # Default to tomorrow → tomorrow+14 days to avoid Jira rejecting today as "in the past".
         # Use timezone-aware ISO format (UTC) to avoid offset-naive vs offset-aware comparison errors.
         from datetime import datetime, timezone, timedelta
+
         now_utc = datetime.now(timezone.utc)
         tomorrow_utc = now_utc + timedelta(days=1)
         default_start = tomorrow_utc.strftime("%Y-%m-%dT00:00:00+00:00")
@@ -893,25 +1359,36 @@ def _normalize_tool_params(
             if not isinstance(v, str):
                 return False
             import re as _red
-            return bool(_red.match(r'^\d{4}-\d{2}-\d{2}', v.strip()))
+
+            return bool(_red.match(r"^\d{4}-\d{2}-\d{2}", v.strip()))
 
         if not _is_date(params.get("start_date")):
-            logger.info("[EXECUTOR] jira_create_sprint: defaulting start_date to %s (tomorrow)", default_start)
+            logger.info(
+                "[EXECUTOR] jira_create_sprint: defaulting start_date to %s (tomorrow)",
+                default_start,
+            )
             params["start_date"] = default_start
         if not _is_date(params.get("end_date")):
-            logger.info("[EXECUTOR] jira_create_sprint: defaulting end_date to %s (tomorrow+14)", default_end)
+            logger.info(
+                "[EXECUTOR] jira_create_sprint: defaulting end_date to %s (tomorrow+14)",
+                default_end,
+            )
             params["end_date"] = default_end
 
         # board_id: recover from prior selection if still a template
         if isinstance(params.get("board_id"), str) and "{{" in params["board_id"]:
             recovered_board = _find_selected_value(
-                results_by_id, flow_data,
+                results_by_id,
+                flow_data,
                 priority_words=["board", "select"],
                 validate=lambda v: v.strip().lstrip("-").isdigit(),
                 transform=lambda v: v.strip(),
             )
             if recovered_board:
-                logger.info("[EXECUTOR] jira_create_sprint: recovered board_id=%r from step results", recovered_board)
+                logger.info(
+                    "[EXECUTOR] jira_create_sprint: recovered board_id=%r from step results",
+                    recovered_board,
+                )
                 params["board_id"] = recovered_board
 
     if tool_name == "jira_create_issue":
@@ -925,26 +1402,33 @@ def _normalize_tool_params(
 
         # Valid Jira project key: 2-10 uppercase letters/digits, no hyphens (not a UUID)
         import re as _re
-        _key_pat = _re.compile(r'\b([A-Z][A-Z0-9]{1,9})\b')  # Look for a key anywhere in the string
-        
+
+        _key_pat = _re.compile(r"\b([A-Z][A-Z0-9]{1,9})\b")  # Look for a key anywhere in the string
+
         orig_key = params.get("project_key", "")
-        match_orig = _key_pat.search(orig_key.strip().upper()) if isinstance(orig_key, str) else None
-        
+        match_orig = (
+            _key_pat.search(orig_key.strip().upper()) if isinstance(orig_key, str) else None
+        )
+
         if match_orig:
             # Successfully extracted a key from the provided string (handles "KEY - Name" cases)
             params["project_key"] = match_orig.group(1)
         else:
             # Scan step results for a valid key — prefer steps named "select*" or "project*"
             # Also check the "selected" field (from request_selection JSON result)
-            _strict_pat = _re.compile(r'^[A-Z][A-Z0-9]{1,9}$')
+            _strict_pat = _re.compile(r"^[A-Z][A-Z0-9]{1,9}$")
             recovered = _find_selected_value(
-                results_by_id, flow_data,
+                results_by_id,
+                flow_data,
                 priority_words=["select", "project", "key"],
                 validate=lambda v: bool(_strict_pat.match(v.strip().upper())),
                 transform=lambda v: v.strip().upper(),
             )
             if recovered:
-                logger.info("[EXECUTOR] jira_create_issue: recovered project_key=%r from step results", recovered)
+                logger.info(
+                    "[EXECUTOR] jira_create_issue: recovered project_key=%r from step results",
+                    recovered,
+                )
                 params["project_key"] = recovered
             else:
                 logger.warning(
@@ -956,12 +1440,16 @@ def _normalize_tool_params(
         if not params.get("issue_type"):
             # Try to find an ask_user answer for issue type
             recovered_type = _find_ask_answer(
-                results_by_id, flow_data,
+                results_by_id,
+                flow_data,
                 priority_words=["issue_type", "type"],
                 transform=lambda v: v.strip().capitalize(),
             )
             if recovered_type:
-                logger.info("[EXECUTOR] jira_create_issue: recovered issue_type=%r from step results", recovered_type)
+                logger.info(
+                    "[EXECUTOR] jira_create_issue: recovered issue_type=%r from step results",
+                    recovered_type,
+                )
                 params["issue_type"] = recovered_type
             else:
                 params["issue_type"] = "Task"
@@ -970,11 +1458,15 @@ def _normalize_tool_params(
         # ── summary ───────────────────────────────────────────────────────
         if not params.get("summary"):
             recovered_summary = _find_ask_answer(
-                results_by_id, flow_data,
+                results_by_id,
+                flow_data,
                 priority_words=["summary", "title"],
             )
             if recovered_summary:
-                logger.info("[EXECUTOR] jira_create_issue: recovered summary=%r from step results", recovered_summary)
+                logger.info(
+                    "[EXECUTOR] jira_create_issue: recovered summary=%r from step results",
+                    recovered_summary,
+                )
                 params["summary"] = recovered_summary
 
     # ── jira_add_comment: comment field aliases ──────────────────────────────
@@ -994,17 +1486,18 @@ def _normalize_tool_params(
         ts = params.get("time_spent", "")
         if ts and isinstance(ts, str):
             import re as _rts
+
             # "1.5 hours" / "1.5h" → "1h 30m"
-            frac = _rts.match(r'^(\d+(?:\.\d+))\s*h', ts.strip(), _rts.IGNORECASE)
+            frac = _rts.match(r"^(\d+(?:\.\d+))\s*h", ts.strip(), _rts.IGNORECASE)
             if frac:
                 total_minutes = int(float(frac.group(1)) * 60)
                 h, m = divmod(total_minutes, 60)
                 params["time_spent"] = f"{h}h {m}m" if m else f"{h}h"
             else:
                 # "3 hours" → "3h"
-                ts2 = _rts.sub(r'(\d+)\s*hours?', r'\1h', ts, flags=_rts.IGNORECASE)
+                ts2 = _rts.sub(r"(\d+)\s*hours?", r"\1h", ts, flags=_rts.IGNORECASE)
                 # "30 minutes" / "30 mins" → "30m"
-                ts2 = _rts.sub(r'(\d+)\s*min(?:utes?)?', r'\1m', ts2, flags=_rts.IGNORECASE)
+                ts2 = _rts.sub(r"(\d+)\s*min(?:utes?)?", r"\1m", ts2, flags=_rts.IGNORECASE)
                 params["time_spent"] = ts2.strip()
 
     # ── jira_create_issue_link: field aliases + direction normalization ───────
@@ -1027,16 +1520,76 @@ def _normalize_tool_params(
         state_val = params.get("state", "")
         if isinstance(state_val, str):
             _state_map = {
-                "start": "active", "begin": "active", "open": "active",
-                "close": "closed", "end": "closed", "complete": "closed", "finish": "closed",
+                "start": "active",
+                "begin": "active",
+                "open": "active",
+                "close": "closed",
+                "end": "closed",
+                "complete": "closed",
+                "finish": "closed",
             }
             params["state"] = _state_map.get(state_val.lower(), state_val)
+
+    # ── jira_search: sanitize JQL + exclude description field (ADF bug in mcp-atlassian) ──
+    if tool_name == "jira_search":
+        jql = params.get("jql", "")
+        if not isinstance(jql, str) or not jql.strip():
+            import re as _re_jql
+
+            proj_key = _first_project_key()
+            params["jql"] = (
+                f"project = {proj_key} ORDER BY created DESC"
+                if proj_key
+                else "ORDER BY created DESC"
+            )
+            logger.warning("[EXECUTOR] jira_search: empty jql — defaulted to %r", params["jql"])
+        elif "{{" in jql:
+            # Unresolved template — substitute project key
+            import re as _re_jql
+
+            proj_key = _first_project_key()
+            cleaned = _re_jql.sub(r"\{\{[^}]+\}\}", proj_key if proj_key else "", jql)
+            cleaned = cleaned.strip().strip("AND").strip("OR").strip()
+            params["jql"] = cleaned or f"project = {proj_key} ORDER BY created DESC"
+            logger.warning(
+                "[EXECUTOR] jira_search: cleaned unresolved JQL template → %r", params["jql"]
+            )
+        # mcp-atlassian v0.11.10 bug: Jira Cloud v3 returns description as ADF dict,
+        # but JiraIssue.description expects str → Pydantic validation error.
+        # Fix: always exclude 'description' from search fields.
+        if "fields" not in params or not params.get("fields"):
+            params["fields"] = "summary,status,assignee,priority,issuetype,labels,updated,created"
+        elif isinstance(params.get("fields"), str) and "description" in params["fields"]:
+            params["fields"] = ",".join(
+                f for f in params["fields"].split(",") if f.strip() != "description"
+            )
+        # Ensure limit is an integer >= 1
+        _lim = params.get("limit", 10)
+        try:
+            params["limit"] = max(1, int(_lim))
+        except (TypeError, ValueError):
+            params["limit"] = 10
+
+    # ── jira_get_assignable_users: resolve <<FIRST_PROJECT_KEY>> sentinel ───────
+    if tool_name == "jira_get_assignable_users":
+        pk = params.get("project_key", "")
+        if not pk or (isinstance(pk, str) and ("{{" in pk or "<<" in pk or not pk.strip())):
+            pk = _first_project_key()
+            if pk:
+                params["project_key"] = pk
+                logger.info("[EXECUTOR] jira_get_assignable_users: using first project key %r", pk)
 
     # ── jira_assign_issue: resolve "me" to configured username ──────────────
     if tool_name == "jira_assign_issue":
         acct = params.get("account_id", "")
-        if isinstance(acct, str) and acct.lower() in ("me", "myself", "currentuser", "current_user"):
+        if isinstance(acct, str) and acct.lower() in (
+            "me",
+            "myself",
+            "currentuser",
+            "current_user",
+        ):
             from dqe_agent.config import settings as _cfg
+
             if _cfg.jira_username:
                 params["account_id"] = _cfg.jira_username
                 logger.info("[EXECUTOR] jira_assign_issue: resolved 'me' to %s", _cfg.jira_username)
@@ -1051,7 +1604,9 @@ def _normalize_tool_params(
     # ── jira_transition_issue: extract transition_id from get_transitions result ──
     if tool_name == "jira_transition_issue":
         tid = params.get("transition_id", "")
-        if isinstance(tid, (list, dict)) or (isinstance(tid, str) and (tid.startswith("[") or tid.startswith("{"))):
+        if isinstance(tid, (list, dict)) or (
+            isinstance(tid, str) and (tid.startswith("[") or tid.startswith("{"))
+        ):
             # The transition_id is a raw result from jira_get_transitions — extract by target status
             # Look at the task context (step description) for the target status name
             try:
@@ -1100,23 +1655,36 @@ def _normalize_tool_params(
                             break
 
                 if best_id:
-                    logger.info("[EXECUTOR] jira_transition_issue: extracted transition_id=%s", best_id)
+                    logger.info(
+                        "[EXECUTOR] jira_transition_issue: extracted transition_id=%s", best_id
+                    )
                     params["transition_id"] = best_id
 
             except Exception as _exc:
-                logger.warning("[EXECUTOR] jira_transition_issue: could not extract transition_id: %s", _exc)
+                logger.warning(
+                    "[EXECUTOR] jira_transition_issue: could not extract transition_id: %s", _exc
+                )
 
     # ── Google Calendar read tools: defaults + injection ─────────────────────
-    _CALENDAR_EVENT_TOOLS = {"get_events", "list_events", "calendar_get_events", "calendar_list_events",
-                             "list_calendars", "calendar_list", "get_calendars"}
+    _CALENDAR_EVENT_TOOLS = {
+        "get_events",
+        "list_events",
+        "calendar_get_events",
+        "calendar_list_events",
+        "list_calendars",
+        "calendar_list",
+        "get_calendars",
+    }
     if tool_name in _CALENDAR_EVENT_TOOLS:
         from datetime import date
+
         today = date.today()
 
         # Auto-inject user_google_email from settings if missing or unresolved
         _email_val = str(params.get("user_google_email", ""))
         if not _email_val or "{{" in _email_val:
             from dqe_agent.config import settings as _cs
+
             if _cs.user_google_email:
                 params["user_google_email"] = _cs.user_google_email
                 logger.info("[EXECUTOR] %s: injected user_google_email from settings", tool_name)
@@ -1124,7 +1692,9 @@ def _normalize_tool_params(
         # list_calendars / get_calendars don't use time filters — stop here
         _CALENDAR_LIST_TOOLS = {"list_calendars", "calendar_list", "get_calendars"}
         if tool_name in _CALENDAR_LIST_TOOLS:
-            for bad in [k for k in list(params.keys()) if k not in {"user_google_email", "max_results"}]:
+            for bad in [
+                k for k in list(params.keys()) if k not in {"user_google_email", "max_results"}
+            ]:
                 params.pop(bad)
             return params
 
@@ -1169,6 +1739,7 @@ def _normalize_tool_params(
         # Ensure start_time/end_time are RFC3339 (YYYY-MM-DDTHH:MM:SSZ)
         def _ensure_rfc3339(val: Any, default_time: str) -> str:
             import re as _re_ev
+
             s = str(val) if val else ""
             if not s or "{{" in s:
                 return s
@@ -1187,22 +1758,32 @@ def _normalize_tool_params(
 
         # If the caller provided a human-friendly duration ("30 minutes", "1 hour"), parse it
         # and compute end_time from start_time. Otherwise default end_time to 1h after start.
-        if params.get("action") == "create" and params.get("start_time") and not params.get("end_time"):
+        if (
+            params.get("action") == "create"
+            and params.get("start_time")
+            and not params.get("end_time")
+        ):
             try:
                 from datetime import datetime, timedelta
+
                 dt = datetime.fromisoformat(params["start_time"].replace("Z", "+00:00"))
                 dur = params.get("duration")
                 if dur and isinstance(dur, str):
                     import re as _re_dur
+
                     m = _re_dur.search(r"(\d+)\s*(h|hr|hour|hours)", dur, _re_dur.I)
                     if m:
                         hours = int(m.group(1))
-                        params["end_time"] = (dt + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        params["end_time"] = (dt + timedelta(hours=hours)).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        )
                     else:
                         m = _re_dur.search(r"(\d+)\s*(m|min|minute|minutes)", dur, _re_dur.I)
                         if m:
                             mins = int(m.group(1))
-                            params["end_time"] = (dt + timedelta(minutes=mins)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            params["end_time"] = (dt + timedelta(minutes=mins)).strftime(
+                                "%Y-%m-%dT%H:%M:%SZ"
+                            )
                 if not params.get("end_time"):
                     params["end_time"] = (dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
                     logger.info("[EXECUTOR] manage_event: defaulted end_time to 1h after start")
@@ -1215,13 +1796,22 @@ def _normalize_tool_params(
         _att = params.get("attendees")
         if isinstance(_att, str):
             _att_lower = _att.strip().lower()
-            if not _att_lower or _att_lower in ("none", "just me", "no one", "only me", "myself",
-                                                 "no attendees", "no one else", "just myself"):
+            if not _att_lower or _att_lower in (
+                "none",
+                "just me",
+                "no one",
+                "only me",
+                "myself",
+                "no attendees",
+                "no one else",
+                "just myself",
+            ):
                 params.pop("attendees", None)
                 logger.info("[EXECUTOR] manage_event: removed 'just me' attendees")
             else:
                 # Parse comma/semicolon-separated emails into a list
                 import re as _re_att
+
                 _emails = [e.strip() for e in _re_att.split(r"[,;]+", _att) if e.strip()]
                 if _emails:
                     params["attendees"] = _emails
@@ -1231,6 +1821,7 @@ def _normalize_tool_params(
     if tool_name == "query_freebusy":
         from dqe_agent.config import settings as _cs
         from datetime import date
+
         _fb_email = str(params.get("user_google_email", ""))
         if not _fb_email or "{{" in _fb_email:
             if _cs.user_google_email:
@@ -1245,17 +1836,113 @@ def _normalize_tool_params(
         if not params.get("calendar_ids"):
             params["calendar_ids"] = ["primary"]
 
-    # ── Jira update_issue: defaults + fields-as-JSON-string ──────────────────
+    # ── Jira update_issue: extract issue_key + ensure fields is dict ────────────
     if tool_name in ("update_issue", "jira_update_issue"):
-        if isinstance(params.get("fields"), dict):
-            params["fields"] = json.dumps(params["fields"])
+        # Log tool schema once so we know what params it accepts
+        try:
+            from dqe_agent.tools import get_tool as _gt_schema
+
+            _t = _gt_schema(tool_name)
+            if _t and hasattr(_t, "args_schema") and _t.args_schema:
+                _schema_keys = list(_t.args_schema.model_json_schema().get("properties", {}).keys())
+                logger.info("[EXECUTOR] jira_update_issue schema keys: %s", _schema_keys)
+        except Exception:
+            pass
+        _ik = params.get("issue_key")
+        # Extract key string from complex create result objects
+        if not isinstance(_ik, str) or not _ik or "{{" in str(_ik):
+            _extracted = ""
+            raw = _ik
+            if isinstance(raw, list) and raw:
+                raw = raw[0]
+            if isinstance(raw, dict):
+                _extracted = (
+                    raw.get("key")
+                    or (raw.get("issue") or {}).get("key")
+                    or (raw.get("_items") or [{}])[0].get("issue", {}).get("key", "")
+                    if isinstance(raw.get("_items"), list)
+                    else ""
+                )
+            if not _extracted:
+                # Fallback: scan all prior step results for a successful create
+                import re as _re_key
+
+                _key_pat = _re_key.compile(r"\b([A-Z][A-Z0-9]{0,9}-\d+)\b")
+                for sr in reversed(list((results_by_id or {}).values())):
+                    if sr.get("tool") not in ("jira_create_issue", "create_issue"):
+                        continue
+                    _res_str = str(sr.get("result", ""))
+                    _km = _key_pat.search(_res_str)
+                    if _km:
+                        _extracted = _km.group(1)
+                        break
+            if _extracted:
+                params["issue_key"] = _extracted
+                logger.info("[EXECUTOR] jira_update_issue: resolved issue_key=%r", _extracted)
+        # fields MUST be a dict — if it arrived as a string, parse it
+        if isinstance(params.get("fields"), str):
+            try:
+                params["fields"] = json.loads(params["fields"])
+            except (json.JSONDecodeError, TypeError):
+                pass
         if not params.get("fields"):
-            params["fields"] = "{}"  # tool requires fields even if empty
+            return params  # nothing to update — skip
+
+        # Deep-resolve {{template}} placeholders inside the fields dict AND flatten
+        # nested Jira-style dicts to plain strings.
+        #
+        # The mcp-atlassian update_issue tool expects a FLAT fields dict:
+        #   {"priority": "P1", "assignee": "accountId..."}
+        # NOT the Jira REST API nested form:
+        #   {"priority": {"name": "P1"}, "assignee": {"accountId": "..."}}
+        # Passing nested dicts causes _get_account_id() to crash with AttributeError.
+        if isinstance(params.get("fields"), dict):
+            _rf: dict = {}
+            for _fk, _fv in params["fields"].items():
+                # Resolve any template strings first
+                if isinstance(_fv, str) and "{{" in _fv:
+                    _fv = _resolve_template(_fv, flow_data, results_by_id)
+                elif isinstance(_fv, dict):
+                    # Resolve templates in nested dict values
+                    _fv = {
+                        _ik2: _resolve_template(_iv, flow_data, results_by_id)
+                        if isinstance(_iv, str) and "{{" in _iv
+                        else _iv
+                        for _ik2, _iv in _fv.items()
+                    }
+
+                # Flatten {"name": "..."} / {"accountId": "..."} / {"id": "..."} to plain string
+                if isinstance(_fv, dict):
+                    _flat = (
+                        _fv.get("accountId")  # assignee Cloud
+                        or _fv.get("name")  # priority / status / etc.
+                        or _fv.get("id")  # numeric id fallback
+                        or _fv.get("key")  # project/parent key fallback
+                    )
+                    if _flat is not None:
+                        _fv = str(_flat).strip()
+
+                # Drop empty values (user left field blank)
+                if isinstance(_fv, str) and not _fv.strip():
+                    logger.info("[EXECUTOR] jira_update_issue: skipping empty field %r", _fk)
+                    continue
+
+                _rf[_fk] = _fv
+            params["fields"] = _rf
+
+        logger.info(
+            "[EXECUTOR] jira_update_issue: final issue_key=%r  fields=%s",
+            params.get("issue_key"),
+            json.dumps(params.get("fields", {})),
+        )
 
     # ── jira_get_transitions + jira_transition_issue: coerce list params to str ─
-    if tool_name in ("jira_transition_issue", "transition_issue",
-                     "jira_get_transitions", "get_transitions"):
-
+    if tool_name in (
+        "jira_transition_issue",
+        "transition_issue",
+        "jira_get_transitions",
+        "get_transitions",
+    ):
         # issue_key might be a multi-select result list: [{'selected': 'FLAG-33', ...}]
         ikey = params.get("issue_key")
         if isinstance(ikey, list):
@@ -1263,7 +1950,9 @@ def _normalize_tool_params(
             extracted_key = ""
             for item in ikey:
                 if isinstance(item, dict):
-                    extracted_key = str(item.get("selected") or item.get("answer") or item.get("key") or "").strip()
+                    extracted_key = str(
+                        item.get("selected") or item.get("answer") or item.get("key") or ""
+                    ).strip()
                 elif isinstance(item, str):
                     extracted_key = item.strip()
                 if extracted_key:
@@ -1271,11 +1960,15 @@ def _normalize_tool_params(
             if extracted_key:
                 logger.info(
                     "[EXECUTOR] %s: extracted issue_key=%r from multi-select list (%d items)",
-                    tool_name, extracted_key, len(ikey),
+                    tool_name,
+                    extracted_key,
+                    len(ikey),
                 )
                 params["issue_key"] = extracted_key
             else:
-                logger.warning("[EXECUTOR] %s: could not extract issue_key from list: %s", tool_name, ikey)
+                logger.warning(
+                    "[EXECUTOR] %s: could not extract issue_key from list: %s", tool_name, ikey
+                )
 
         # transition_id coercion — only for transition_issue
         if tool_name in ("jira_transition_issue", "transition_issue"):
@@ -1283,8 +1976,17 @@ def _normalize_tool_params(
             if isinstance(tid, list):
                 # Planner passed the full transitions list instead of a single ID string.
                 # Auto-pick by matching "done/close/resolve" names, else first item.
-                _DONE_NAMES = {"done", "closed", "close", "complete", "completed",
-                               "resolve", "resolved", "finish", "finished"}
+                _DONE_NAMES = {
+                    "done",
+                    "closed",
+                    "close",
+                    "complete",
+                    "completed",
+                    "resolve",
+                    "resolved",
+                    "finish",
+                    "finished",
+                }
                 matched_id = None
                 for entry in tid:
                     if isinstance(entry, dict):
@@ -1297,31 +1999,85 @@ def _normalize_tool_params(
                 if matched_id:
                     logger.info(
                         "[EXECUTOR] jira_transition_issue: auto-extracted transition_id=%r from %d-item list",
-                        matched_id, len(tid),
+                        matched_id,
+                        len(tid),
                     )
                     params["transition_id"] = matched_id
                 else:
-                    logger.warning("[EXECUTOR] jira_transition_issue: could not extract id from list: %s", tid)
+                    logger.warning(
+                        "[EXECUTOR] jira_transition_issue: could not extract id from list: %s", tid
+                    )
             elif isinstance(tid, (int, float)):
                 params["transition_id"] = str(int(tid))
 
     # ── Gmail tools: auto-inject user_google_email ───────────────────────────
     _GMAIL_TOOLS = {
-        "send_gmail_message", "search_gmail_messages", "get_gmail_message_content",
-        "get_gmail_messages_content_batch", "draft_gmail_message",
-        "get_gmail_thread_content", "modify_gmail_message_labels",
+        "send_gmail_message",
+        "search_gmail_messages",
+        "get_gmail_message_content",
+        "get_gmail_messages_content_batch",
+        "draft_gmail_message",
+        "get_gmail_thread_content",
+        "modify_gmail_message_labels",
         "batch_modify_gmail_message_labels",
     }
     if tool_name in _GMAIL_TOOLS:
         from dqe_agent.config import settings as _cs
+
         _gm_email = str(params.get("user_google_email", ""))
         if not _gm_email or "{{" in _gm_email:
             if _cs.user_google_email:
                 params["user_google_email"] = _cs.user_google_email
                 logger.info("[EXECUTOR] %s: injected user_google_email from settings", tool_name)
 
-    return params
+    # ── llm_draft_content: ensure context and topic are strings ──────────────
+    if tool_name == "llm_draft_content":
 
+        def _to_str(val: Any) -> str:
+            if isinstance(val, str):
+                return val
+            if isinstance(val, list) and len(val) == 1:
+                val = val[0]
+            if isinstance(val, dict):
+                return "; ".join(
+                    f"{k}: {v}" for k, v in val.items() if k not in ("_items", "_list") and v
+                )
+            return str(val) if val is not None else ""
+
+        if not isinstance(params.get("context"), str):
+            params["context"] = _to_str(params.get("context"))
+        if not isinstance(params.get("topic"), str):
+            params["topic"] = _to_str(params.get("topic"))
+        # Replace accountId in context/topic with display name from fetch_users result
+        import re as _re_aid
+
+        _AID_PAT = _re_aid.compile(r"\d+:[0-9a-f\-]{30,}")
+
+        def _replace_account_ids(text: str) -> str:
+            if not _AID_PAT.search(text):
+                return text
+            _users_entry = (results_by_id or {}).get("fetch_users", {})
+            _users_raw = _users_entry.get("result", "") if isinstance(_users_entry, dict) else ""
+            try:
+                _users_list = json.loads(_users_raw) if isinstance(_users_raw, str) else _users_raw
+            except Exception:
+                _users_list = []
+            if not isinstance(_users_list, list):
+                _items = _users_list.get("_items", []) if isinstance(_users_list, dict) else []
+                _users_list = _items
+            _aid_map = {
+                u["value"]: u["label"]
+                for u in _users_list
+                if isinstance(u, dict) and "value" in u and "label" in u
+            }
+            return _AID_PAT.sub(lambda m: _aid_map.get(m.group(0), m.group(0)), text)
+
+        if params.get("context"):
+            params["context"] = _replace_account_ids(params["context"])
+        if params.get("topic"):
+            params["topic"] = _replace_account_ids(params["topic"])
+
+    return params
 
 
 def _find_selected_value(
@@ -1332,6 +2088,7 @@ def _find_selected_value(
     validate=None,
 ) -> str:
     """Like _find_ask_answer but also checks the 'selected' field from request_selection results."""
+
     def _score(sid: str) -> int:
         sid_lower = sid.lower()
         return sum(1 for w in priority_words if w in sid_lower)
@@ -1400,6 +2157,7 @@ def _find_ask_answer(
     Falls back to flow_data if results_by_id doesn't yield a match.
     Returns the first matching answer (optionally transformed and validated), or ''.
     """
+
     def _score(sid: str) -> int:
         sid_lower = sid.lower()
         return sum(1 for w in priority_words if w in sid_lower)
@@ -1447,7 +2205,8 @@ def _resolve_params(params: dict, flow_data: dict, results_by_id: dict) -> dict:
     a string, avoiding Pydantic validation errors downstream.
     """
     import re as _re
-    _pure_ref = _re.compile(r'^\{\{(.+?)\}\}$')
+
+    _pure_ref = _re.compile(r"^\{\{(.+?)\}\}$")
 
     resolved = {}
     for key, val in params.items():
@@ -1526,6 +2285,7 @@ def _resolve_ref_to_object(ref: str, flow_data: dict, results_by_id: dict) -> An
 def _resolve_template(template: str, flow_data: dict, results_by_id: dict) -> str:
     """Replace all {{ref}} placeholders in a string."""
     import re
+
     def replacer(match):
         ref = match.group(1).strip()
         parts = ref.split(".")
@@ -1549,7 +2309,11 @@ def _resolve_template(template: str, flow_data: dict, results_by_id: dict) -> st
                 for p in parts[1:]:
                     nav = nav.get(p, "") if isinstance(nav, dict) else ""
                 if nav:
-                    return str(nav) if not isinstance(nav, (dict, list)) else json.dumps(nav, indent=2, ensure_ascii=False)
+                    return (
+                        str(nav)
+                        if not isinstance(nav, (dict, list))
+                        else json.dumps(nav, indent=2, ensure_ascii=False)
+                    )
                 # Sub-key not found or empty — return full result so user sees the data
                 items = _extract_items_from_response(r)
                 if items:

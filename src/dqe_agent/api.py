@@ -296,6 +296,16 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                     value = json.dumps(value)
                 await human_q.put(str(value))
 
+            elif mtype == "form_response":
+                # User submitted a multi-field form — route all values into the queue as JSON
+                values = msg.get("values", {})
+                await human_q.put(json.dumps(values) if isinstance(values, dict) else str(values))
+
+            elif mtype == "edit_response":
+                # User submitted edited content — route final text into the queue
+                content = msg.get("content", "")
+                await human_q.put(str(content))
+
             elif mtype == "browser_input":
                 asyncio.create_task(_handle_browser_input(msg, session_id))
 
@@ -415,6 +425,33 @@ async def _handle_message(ws: WebSocket, session_id: str, message: str) -> None:
                             "question": interrupt_val.get("question", "Please select an option:"),
                             "options": interrupt_val.get("options", []),
                             "multi_select": interrupt_val.get("multi_select", False),
+                        })
+                    elif interrupt_type == "form":
+                        # Multi-field form — frontend renders all fields at once
+                        logger.info(
+                            "[%s] form_request: %r (%d fields)",
+                            session_id,
+                            interrupt_val.get("title", "")[:60],
+                            len(interrupt_val.get("fields", [])),
+                        )
+                        await _send(ws, {
+                            "type": "form_request",
+                            "title": interrupt_val.get("title", ""),
+                            "fields": interrupt_val.get("fields", []),
+                        })
+                    elif interrupt_type == "edit_request":
+                        # Editable textarea — frontend pre-fills content and lets user modify
+                        logger.info(
+                            "[%s] edit_request: label=%r content_len=%d",
+                            session_id,
+                            interrupt_val.get("label", "")[:60],
+                            len(interrupt_val.get("content", "")),
+                        )
+                        await _send(ws, {
+                            "type": "edit_request",
+                            "label": interrupt_val.get("label", ""),
+                            "content": interrupt_val.get("content", ""),
+                            "question": interrupt_val.get("question", ""),
                         })
                     else:
                         # Plain human review / ask_user
@@ -882,7 +919,13 @@ def _safe_args(args: Any) -> Any:
 # Static files
 # ══════════════════════════════════════════════════════════════════════════════
 if _DIST_DIR.exists():
-    app.mount("/assets", StaticFiles(directory=_DIST_DIR / "assets"), name="static-assets")
+    # Mount whichever static dirs exist (Next.js uses _next/, Vite uses assets/)
+    _assets_dir = _DIST_DIR / "assets"
+    _next_dir = _DIST_DIR / "_next"
+    if _assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=_assets_dir), name="static-assets")
+    if _next_dir.exists():
+        app.mount("/_next", StaticFiles(directory=_next_dir), name="static-next")
 
     @app.get("/favicon.svg")
     async def favicon():
