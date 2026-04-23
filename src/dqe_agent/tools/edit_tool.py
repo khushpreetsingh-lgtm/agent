@@ -43,7 +43,6 @@ async def request_edit(
     """
     if not question:
         question = f"Review and edit the {label.lower()} below, then click Send:"
-
     result = interrupt({
         "type": "edit_request",
         "label": label,
