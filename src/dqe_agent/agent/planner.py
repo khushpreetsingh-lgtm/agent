@@ -403,17 +403,17 @@ OUTPUT RULES:
       "what work did X do?" with no date → JQL has NO date clause. Return all results.
       NEVER default to startOfDay(), -1d, -7d, or any date when the user did not ask for it.
 
-10. ⚑ PAGINATION RULES:
+10. ⚑ PAGINATION RULES (CRITICAL — READ CAREFULLY):
    • jira_search and jira_get_sprint_issues return at most 50 results at a time.
-   • Always tell the user how many were shown and whether more exist. End direct_response with:
-     "Showing X of Y results. Say 'show more' or 'next' to see the next page." (omit if no more).
-   • When PAGINATION CONTEXT is present in the context (injected automatically):
-     - "next" / "more" / "show more" / "next 50" / "continue" → repeat the same query with start_at=<next_start_at>
-     - "previous" / "go back" → repeat with start_at=<prev_start_at>
-     - "from beginning" / "restart" → repeat with start_at=0
+   • When PAGINATION CONTEXT is present in AVAILABLE DATA (look for "PAGINATION CONTEXT" section):
+     - If user says "next" / "more" / "show more" / "continue" → ONLY use jira_search with the exact query + start_at or page_token from context
+     - DO NOT re-ask for project, assignee, or any other parameters — ALL values are in PAGINATION CONTEXT
+     - DO NOT create multi-step plans — pagination is a SINGLE tool call with incremented start_at
+     - Example plan when user says "show more":
+       [{"id":"fetch","tool":"jira_search","params":{"jql":"<exact jql from context>","start_at":<next_start_at from context>,"limit":50}}]
    • For sprint issues pagination: jira_get_sprint_issues has no start_at — use jira_search with
      jql="sprint = <sprint_id>" + start_at for any page after the first.
-   • NEVER re-ask for project/sprint/filter when paginating — reuse values from PAGINATION CONTEXT.
+   • If no PAGINATION CONTEXT exists, treat as new query (full plan needed).
 
 ═══════════════════════════════════════════════════════════════════
 TOOLS

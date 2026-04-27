@@ -410,8 +410,13 @@ def _format_result_for_display(raw: str) -> str:
             )
             issue_type = _str_field(fields, "issuetype") or _str_field(issue, "issuetype")
 
-            # Line 1: key + summary
-            title = f"**{key}** — {summary}" if key else f"**{summary}**"
+            # Line 1: key + summary (with Jira link)
+            if key:
+                from dqe_agent.config import settings as _cfg
+                jira_base = _cfg.jira_url.rstrip("/") if _cfg.jira_url else ""
+                title = f"**[{key}]({jira_base}/browse/{key})** — {summary}" if jira_base else f"**{key}** — {summary}"
+            else:
+                title = f"**{summary}**"
             # Line 2: meta details
             meta_parts = []
             if status:
