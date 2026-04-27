@@ -2278,7 +2278,7 @@ def _fix_json_control_chars(s: str) -> str:
 
 
 
-async def planner_node(state: AgentState) -> dict:
+async def planner_node(state: AgentState, _tool_filter: list[str] | None = None) -> dict:
     """Generate a plan from the task. Runs ONCE at the start."""
     from dqe_agent.llm import get_planner_llm
 
@@ -2352,6 +2352,19 @@ async def planner_node(state: AgentState) -> dict:
             "and the MCP tools listed in AVAILABLE_MCP_TOOLS."
         )
     mcp_tools = [t for t in list_tool_names() if t not in _browser_tool_set]
+
+    # Apply agent tool filter if set
+    if _tool_filter is None and state.get("agent_id"):
+        try:
+            from dqe_agent.agents import get_agent as _get_agent_cfg
+            _cfg = _get_agent_cfg(state["agent_id"])
+            if _cfg.tools is not None:
+                _tool_filter = _cfg.tools
+        except KeyError:
+            pass
+    if _tool_filter is not None:
+        mcp_tools = [t for t in mcp_tools if t in _tool_filter]
+
     if mcp_tools:
         # ── Fast path: serve cached tool description block ───────────────────
         _tool_key = frozenset(mcp_tools)

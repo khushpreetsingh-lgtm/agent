@@ -554,9 +554,18 @@ def _build_completion_summary(step_results: list) -> str:
     return "\n".join(lines)
 
 
-async def executor_node(state: AgentState) -> dict:
+async def executor_node(state: AgentState, _tool_filter: list[str] | None = None) -> dict:
     """Execute the current step in the plan."""
     from dqe_agent.tools import get_tool
+
+    # Resolve tool filter from agent_id if not passed directly
+    if _tool_filter is None and state.get("agent_id"):
+        try:
+            from dqe_agent.agents import get_agent as _get_agent_cfg
+            _cfg = _get_agent_cfg(state["agent_id"])
+            _tool_filter = _cfg.tools  # may still be None = all tools
+        except KeyError:
+            pass
 
     plan = state.get("plan", [])
     idx = state.get("current_step_index", 0)

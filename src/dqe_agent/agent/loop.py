@@ -50,13 +50,27 @@ def route_start(state: AgentState) -> str:
     return "planner"
 
 
-def build_pev_graph() -> StateGraph:
-    """Build the Planner-Executor-Verifier LangGraph."""
+def build_pev_graph(tool_filter: list[str] | None = None) -> StateGraph:
+    """Build the Planner-Executor-Verifier LangGraph.
+
+    Args:
+        tool_filter: Optional list of tool names to expose. None = all tools.
+    """
+    from functools import partial
+
     builder = StateGraph(AgentState)
 
+    # Wrap planner/executor with tool filter if provided
+    if tool_filter is not None:
+        _planner = partial(planner_node, _tool_filter=tool_filter)
+        _executor = partial(executor_node, _tool_filter=tool_filter)
+    else:
+        _planner = planner_node
+        _executor = executor_node
+
     # Nodes
-    builder.add_node("planner", planner_node)
-    builder.add_node("executor", executor_node)
+    builder.add_node("planner", _planner)
+    builder.add_node("executor", _executor)
     builder.add_node("verifier", verifier_node)
 
     # Entry: plan first (or skip if plan exists)

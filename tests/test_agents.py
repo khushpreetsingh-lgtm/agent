@@ -79,3 +79,10 @@ def test_browser_agent_is_fallback():
     discover_agents()
     agent = get_agent("browser")
     assert agent.tools is None  # browser agent = all tools (catch-all fallback)
+
+
+def test_pev_graph_respects_tool_filter():
+    """build_pev_graph with tool_filter compiles without error."""
+    from dqe_agent.agent.loop import build_pev_graph
+    graph = build_pev_graph(tool_filter=["direct_response", "ask_user"])
+    assert graph is not None
