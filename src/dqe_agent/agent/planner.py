@@ -842,35 +842,37 @@ To retrieve active sprints (e.g. "what is the active sprint for me?", "status of
     [Rule] ALWAYS include AND project = {{sel_proj.selected}} in the JQL when a project was selected.
 
   Assignee workload — OPEN tasks ("what is Tom working on?" / "show Hrithik's tasks" / "open tasks of saddam jameel"):
+  ⚑ JQL issuetype rule: if user says "tasks" → add AND issuetype = Task. If user says "bugs" → AND issuetype = Bug. If user says "issues" or generic → omit issuetype filter.
+  ⚑ Message label rule: use the EXACT word the user said — "tasks", "bugs", "issues", "tickets" — in the direct_response message. Never substitute a different word.
   [Rule] Full name (TWO+ words) known → NEVER add project-selection or member-fetch steps. Use JQL directly.
-  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = \"Tom Smith\" AND status != Done ORDER BY updated DESC","limit":50},"success_criteria":"Issues listed"},
-   {"id":"r","tool":"direct_response","params":{"message":"Tom Smith's open issues:\n{{s}}"}}]
+  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = \"Tom Smith\" AND issuetype = Task AND status != Done ORDER BY updated DESC","limit":50},"success_criteria":"Tasks listed"},
+   {"id":"r","tool":"direct_response","params":{"message":"Tom Smith's open tasks:\n{{s}}"}}]
 
   Single/partial name ("tania", "john") → Required disambiguation first:
   [{"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
    {"id":"members","tool":"jira_get_assignable_users","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Members fetched"},
    {"id":"pick","tool":"request_selection","params":{"question":"Which Tania do you mean?","options":"{{members}}","multi_select":false},"success_criteria":"Person selected"},
-   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND project = {{sel_proj.selected}} AND status != Done ORDER BY updated DESC","limit":50},"success_criteria":"Issues listed"},
-   {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s open issues:\n{{s}}"}}]
+   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND project = {{sel_proj.selected}} AND issuetype = Task AND status != Done ORDER BY updated DESC","limit":50},"success_criteria":"Tasks listed"},
+   {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s open tasks:\n{{s}}"}}]
 
   Assignee COMPLETED tasks ("tasks done by tania" / "what did tania perform?" / "what tasks did tania have?"):
   Single/partial name → Required disambiguation:
   [{"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
    {"id":"members","tool":"jira_get_assignable_users","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Members fetched"},
    {"id":"pick","tool":"request_selection","params":{"question":"Which Tania do you mean?","options":"{{members}}","multi_select":false},"success_criteria":"Person selected"},
-   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND project = {{sel_proj.selected}} AND status = Done ORDER BY updated DESC","limit":50},"success_criteria":"Completed issues listed"},
+   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND project = {{sel_proj.selected}} AND issuetype = Task AND status = Done ORDER BY updated DESC","limit":50},"success_criteria":"Completed tasks listed"},
    {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s completed tasks:\n{{s}}"}}]
 
   Full name completed tasks ("tasks done by saddam jameel"):
   [Rule] Full name → NO project-selection steps. Use JQL directly.
-  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = \"Saddam Jameel\" AND status = Done ORDER BY updated DESC","limit":50},"success_criteria":"Completed issues listed"},
+  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = \"Saddam Jameel\" AND issuetype = Task AND status = Done ORDER BY updated DESC","limit":50},"success_criteria":"Completed tasks listed"},
    {"id":"r","tool":"direct_response","params":{"message":"Saddam Jameel's completed tasks:\n{{s}}"}}]
 
   ⚑ Project filter: if a project is mentioned, use project members instead of global selection.
     "tasks done by tania in acumen" → use jira_get_assignable_users(project_key="<ACUMEN_KEY>") then add "AND project = <ACUMEN_KEY>" to JQL.
 
   ALL tasks (open + done) for a person ("all tasks of X" / "everything assigned to X"):
-  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" ORDER BY updated DESC","limit":50},"success_criteria":"All issues listed"},
+  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND issuetype = Task ORDER BY updated DESC","limit":50},"success_criteria":"All tasks listed"},
    {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s tasks:\n{{s}}"}}]
 
   Sprint days remaining ("how many days left in sprint?"):
