@@ -2815,6 +2815,23 @@ async def _normalize_tool_params(
         # steps when a user names a person ambiguously. Leave member_name as-is
         # so the planner's plan can include explicit request_selection steps.
 
+        # Extract date strings when template resolved to a sprint object/list
+        # e.g. {{get_sprint.start_date}} resolves to the full sprint list instead of a string
+        for _date_key in ("start_date", "end_date"):
+            _dv = params.get(_date_key)
+            if isinstance(_dv, list) and _dv:
+                _dv = _dv[0]  # take first sprint object
+            if isinstance(_dv, dict):
+                # Sprint object: {"start_date": "2024-08-26T...", "end_date": "..."}
+                _extracted = _dv.get(_date_key) or _dv.get("startDate") or _dv.get("endDate") or _dv.get("start_date") or _dv.get("end_date")
+                if _extracted and isinstance(_extracted, str):
+                    # Trim to date only: "2024-08-26T16:34:00.946Z" → "2024-08-26"
+                    params[_date_key] = _extracted[:10]
+                    logger.info("[EXECUTOR] jira_get_worklogs_by_date_range: extracted %s=%r from sprint object", _date_key, params[_date_key])
+            elif isinstance(_dv, str) and "T" in _dv:
+                # ISO datetime → date only
+                params[_date_key] = _dv[:10]
+
     # ── jira_get_assignable_users: resolve missing/unresolved project_key ──────
     if tool_name == "jira_get_assignable_users":
         pk = params.get("project_key", "")
