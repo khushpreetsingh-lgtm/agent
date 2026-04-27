@@ -651,3 +651,176 @@ async def jira_get_worklogs_by_date_range(
         "issues_scanned": len(all_issues),
         "users": users_out,
     }
+
+
+@register_tool(
+    name="jira_get_project_fields",
+    description=(
+        "Get available fields for a Jira project and issue type. "
+        "Returns which fields exist (priority, story_points, components, sprint, labels, etc.) "
+        "and which are required. Call this BEFORE creating an issue to know what to ask the user."
+    ),
+)
+async def jira_get_project_fields(
+    project_key: str,
+    issue_type: str = "Task",
+) -> dict:
+    """Fetch create-metadata for a project/issue-type to discover available fields."""
+    auth = _jira_auth()
+    if not auth:
+        return {"error": "Jira not configured"}
+
+    from dqe_agent.config import settings
+    base_url = settings.jira_url.rstrip("/")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        # Jira Cloud createmeta endpoint
+        resp = await client.get(
+            f"{base_url}/rest/api/3/issue/createmeta",
+            params={
+                "projectKeys": project_key,
+                "issuetypeNames": issue_type,
+                "expand": "projects.issuetypes.fields",
+            },
+            auth=auth,
+        )
+        if resp.status_code == 404:
+            # Jira Cloud newer API
+            resp = await client.get(
+                f"{base_url}/rest/api/3/issue/createmeta/{project_key}/issuetypes",
+                auth=auth,
+            )
+
+        resp.raise_for_status()
+        data = resp.json()
+
+    # Parse out fields from createmeta response
+    fields_out: dict[str, dict] = {}
+
+    projects = data.get("projects", [])
+    if projects:
+        for issue_type_data in projects[0].get("issuetypes", []):
+            if issue_type_data.get("name", "").lower() == issue_type.lower():
+                for field_id, field_info in issue_type_data.get("fields", {}).items():
+                    name = field_info.get("name", field_id)
+                    required = field_info.get("required", False)
+                    schema = field_info.get("schema", {})
+                    allowed = field_info.get("allowedValues", [])
+
+                    # Only surface fields useful for creation (skip system internals)
+                    _SKIP = {"issuetype", "project", "reporter", "summary", "description",
+                              "attachment", "issuelinks", "subtasks", "creator", "created",
+                              "updated", "status", "resolution", "resolutiondate", "votes",
+                              "watches", "workratio", "lastViewed", "timespent", "progress",
+                              "aggregateprogress", "comment", "worklog", "changelog"}
+                    if field_id in _SKIP:
+                        continue
+
+                    field_entry: dict = {
+                        "id": field_id,
+                        "name": name,
+                        "required": required,
+                        "type": schema.get("type", "string"),
+                    }
+                    if allowed:
+                        field_entry["options"] = [
+                            v.get("name") or v.get("value") or str(v)
+                            for v in allowed[:30]
+                        ]
+                    fields_out[field_id] = field_entry
+
+    # Fallback: parse newer API format
+    if not fields_out and "fields" in data:
+        for f in data.get("fields", []):
+            field_id = f.get("fieldId", "")
+            _SKIP = {"issuetype", "project", "reporter", "summary", "description"}
+            if field_id in _SKIP:
+                continue
+            field_entry = {
+                "id": field_id,
+                "name": f.get("name", field_id),
+                "required": f.get("required", False),
+                "type": f.get("schema", {}).get("type", "string"),
+            }
+            allowed = f.get("allowedValues", [])
+            if allowed:
+                field_entry["options"] = [
+                    v.get("name") or v.get("value") or str(v)
+                    for v in allowed[:30]
+                ]
+            fields_out[field_id] = field_entry
+
+    # Categorise for easy planner consumption
+    has_priority = "priority" in fields_out
+    has_story_points = any(k in fields_out for k in ("story_points", "customfield_10016", "customfield_10028", "storyPoints"))
+    has_sprint = any(k in fields_out for k in ("sprint", "customfield_10020"))
+    has_components = "components" in fields_out
+    has_labels = "labels" in fields_out
+    has_fix_versions = "fixVersions" in fields_out
+
+    logger.info(
+        "[jira_get_project_fields] %s/%s → %d fields (priority=%s, sp=%s, sprint=%s)",
+        project_key, issue_type, len(fields_out), has_priority, has_story_points, has_sprint,
+    )
+
+    return {
+        "project_key": project_key,
+        "issue_type": issue_type,
+        "fields": fields_out,
+        "supports": {
+            "priority": has_priority,
+            "story_points": has_story_points,
+            "sprint": has_sprint,
+            "components": has_components,
+            "labels": has_labels,
+            "fix_versions": has_fix_versions,
+        },
+    }
+
+
+@register_tool(
+    name="jira_add_attachment",
+    description=(
+        "Upload a file attachment to an existing Jira issue. "
+        "Provide the issue_key and the local file_path to upload. "
+        "Returns the attachment URL on success."
+    ),
+)
+async def jira_add_attachment(
+    issue_key: str,
+    file_path: str,
+) -> dict:
+    """Upload a local file to a Jira issue as an attachment."""
+    import os
+    auth = _jira_auth()
+    if not auth:
+        return {"error": "Jira not configured"}
+
+    if not os.path.exists(file_path):
+        return {"error": f"File not found: {file_path}"}
+
+    from dqe_agent.config import settings
+    base_url = settings.jira_url.rstrip("/")
+    file_name = os.path.basename(file_path)
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        with open(file_path, "rb") as f:
+            resp = await client.post(
+                f"{base_url}/rest/api/3/issue/{issue_key}/attachments",
+                headers={"X-Atlassian-Token": "no-check"},
+                auth=auth,
+                files={"file": (file_name, f, "application/octet-stream")},
+            )
+        resp.raise_for_status()
+        result = resp.json()
+
+    attachments = result if isinstance(result, list) else [result]
+    urls = [a.get("content", "") for a in attachments if a.get("content")]
+
+    logger.info("[jira_add_attachment] %s ← %s ✅", issue_key, file_name)
+    return {
+        "issue_key": issue_key,
+        "file_name": file_name,
+        "attachment_url": urls[0] if urls else "",
+        "status": "uploaded",
+    }

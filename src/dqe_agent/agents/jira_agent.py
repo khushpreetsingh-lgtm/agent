@@ -16,6 +16,8 @@ class JiraAgent(AgentConfig):
         "jira_search_user_by_email",
         "jira_add_project_member",
         "jira_get_worklogs_by_date_range",
+        "jira_get_project_fields",
+        "jira_add_attachment",
         "ask_user",
         "request_selection",
         "human_review",

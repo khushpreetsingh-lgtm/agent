@@ -503,6 +503,15 @@ Use plain success_criteria like "Issue created successfully" or "Projects listed
 
 ⚑ Assignees MUST be fetched AFTER the project key is known — they are project-specific.
 
+⚑ FIELD DISCOVERY RULE — ALWAYS call jira_get_project_fields first to discover which fields
+  the project actually supports. Then show ONLY fields the project supports:
+  - If supports.priority=false → OMIT priority from form AND from jira_update_issue
+  - If supports.story_points=true → ADD story_points number field to form
+  - If supports.sprint=true → ADD sprint selection to form
+  - If supports.components=true AND components exist → ADD components multi-select
+  - If supports.labels=true → ADD labels text field
+  Never show a field the project does not support.
+
 CASE A — project IS stated in the task (e.g. "create issue in FLAG", "create bug in insuretech"):
   • Scan JIRA_PROJECTS_PREFETCHED to find the real key ("value") for the project the user named.
   • Use that real key throughout — DO NOT put a project selection field in the form.
@@ -516,62 +525,86 @@ CASE A — project IS stated in the task (e.g. "create issue in FLAG", "create b
   • assignee:   user named a person → OMIT this field, resolve the name from fetch_users and hardcode
                 user gave no assignee → include as select, required:false
   • priority:   user gave an exact priority → OMIT this field, hardcode in upd_issue
-                user gave no priority → include as select, required:true
+                user gave no priority AND supports.priority=true → include as select, required:true
   • desc_topic: always optional — pre-fill with user's description if they gave one, otherwise leave blank
 
   EXAMPLE — user says "create a task in FLAG for making UI with hero UI, assign to hrithik":
     Known: project=FLAG, summary≈"Making UI with Hero UI", type=task (implied), assignee≈"hrithik"
-    Form should only show: priority (unknown), desc_topic (optional)
+    Form should only show: priority (if project supports it), desc_topic (optional)
     Assignee is resolved by matching "hrithik" against fetch_users options (case-insensitive first-name match)
     Hardcode: issue_type="Task", assignee="Hrithik <FullName>" from fetch_users
 
   EXACT JSON for CASE A (replace every <REAL_KEY> with the matched project value):
+  {"id":"get_fields","tool":"jira_get_project_fields","params":{"project_key":"<REAL_KEY>","issue_type":"<ISSUE_TYPE_OR_Task>"},"success_criteria":"Project fields discovered"},
   {"id":"get_pri","tool":"jira_get_priorities","params":{"project_key":"<REAL_KEY>"},"success_criteria":"Priorities fetched"},
   {"id":"fetch_users","tool":"jira_get_assignable_users","params":{"project_key":"<REAL_KEY>"},"success_criteria":"Users fetched"},
-  {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Task","fields":[
-    {"id":"summary","label":"Task Summary","type":"text","required":<true_if_unknown|false_if_known>,"placeholder":"Short one-line title","default":"<known_summary_or_omit>"},
+  {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Issue","fields":[
+    {"id":"summary","label":"Summary","type":"text","required":<true_if_unknown|false_if_known>,"placeholder":"Short one-line title","default":"<known_summary_or_omit>"},
     <OMIT issue_type field if type is known — use hardcoded value in create_issue>,
     {"id":"issue_type","label":"Issue Type","type":"select","required":true,"options":[{"value":"Task","label":"Task"},{"value":"Bug","label":"Bug"},{"value":"Story","label":"Story"},{"value":"Epic","label":"Epic"}]},
+    <INCLUDE priority ONLY if get_fields result shows supports.priority=true AND user did not state priority>,
     {"id":"priority","label":"Priority","type":"select","required":true,"options":"{{get_pri}}"},
     <OMIT assignee field if assignee name was stated — resolve from fetch_users and hardcode>,
     {"id":"assignee","label":"Assignee","type":"select","required":false,"options":"{{fetch_users}}"},
-    {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?","default":"<known_description_if_any>"}
+    <INCLUDE story_points ONLY if get_fields result shows supports.story_points=true>,
+    {"id":"story_points","label":"Story Points","type":"number","required":false,"placeholder":"e.g. 3"},
+    <INCLUDE sprint ONLY if get_fields result shows supports.sprint=true>,
+    {"id":"sprint","label":"Sprint","type":"text","required":false,"placeholder":"Sprint name or leave blank"},
+    <INCLUDE labels ONLY if get_fields result shows supports.labels=true>,
+    {"id":"labels","label":"Labels","type":"text","required":false,"placeholder":"comma-separated labels"},
+    {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?","default":"<known_description_if_any>"},
+    {"id":"attachment","label":"Attach file? (enter local file path or leave blank)","type":"text","required":false,"placeholder":"/path/to/file.png"}
   ]},"success_criteria":"All task details collected"},
-  {"id":"gen_desc","tool":"llm_draft_content","params":{"content_type":"issue_description","topic":"{{collect_info.desc_topic}}","context":"{{collect_info.issue_type}} in <REAL_KEY>: {{collect_info.summary}}, priority {{collect_info.priority}}"},"success_criteria":"Description drafted"},
+  {"id":"gen_desc","tool":"llm_draft_content","params":{"content_type":"issue_description","topic":"{{collect_info.desc_topic}}","context":"{{collect_info.issue_type}} in <REAL_KEY>: {{collect_info.summary}}"},"success_criteria":"Description drafted"},
   {"id":"edit_desc","tool":"request_edit","params":{"label":"Issue Description","content":"{{gen_desc.content}}"},"success_criteria":"Description reviewed"},
   {"id":"create_issue","tool":"jira_create_issue","params":{"project_key":"<REAL_KEY>","issue_type":"{{collect_info.issue_type}}","summary":"{{collect_info.summary}}","description":"{{edit_desc.content}}"},"success_criteria":"Issue created"},
   {"id":"upd_issue","tool":"jira_update_issue","params":{"issue_key":"{{create_issue.key}}","fields":{"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"}},"success_criteria":"Priority and assignee set"},
+  <INCLUDE attachment step ONLY if user provided a file path in collect_info.attachment>,
+  {"id":"attach","tool":"jira_add_attachment","params":{"issue_key":"{{create_issue.key}}","file_path":"{{collect_info.attachment}}"},"success_criteria":"Attachment uploaded"},
   {"id":"get_created","tool":"jira_get_issue","params":{"issue_key":"{{create_issue.key}}"},"success_criteria":"Issue details fetched"},
   {"id":"done","tool":"direct_response","params":{"message":"Issue created successfully!\n\nKey: {{create_issue.key}}\nSummary: {{collect_info.summary}}\nType: {{collect_info.issue_type}}\nPriority: {{collect_info.priority}}\nAssignee: {{collect_info.assignee}}\n\nFull details:\n{{get_created}}"}}
 
 CASE B — project NOT stated in the task:
-  First show project selection, then fetch assignees for the CHOSEN project.
+  First show project selection, then fetch fields+assignees for the CHOSEN project.
   Apply the same SMART FORM RULE — only include fields not already known.
 
   EXACT JSON for CASE B:
   {"id":"sel_proj","tool":"request_selection","params":{"question":"Which Jira project should this be created in?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
+  {"id":"get_fields","tool":"jira_get_project_fields","params":{"project_key":"{{sel_proj.selected}}","issue_type":"Task"},"success_criteria":"Project fields discovered"},
   {"id":"get_pri","tool":"jira_get_priorities","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Priorities fetched"},
   {"id":"fetch_users","tool":"jira_get_assignable_users","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Users fetched"},
-  {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Task","fields":[
-    {"id":"summary","label":"Task Summary","type":"text","required":<true_if_unknown|false_if_known>,"placeholder":"Short one-line title","default":"<known_summary_or_omit>"},
+  {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Issue","fields":[
+    {"id":"summary","label":"Summary","type":"text","required":<true_if_unknown|false_if_known>,"placeholder":"Short one-line title","default":"<known_summary_or_omit>"},
     <OMIT issue_type field if type is known>,
     {"id":"issue_type","label":"Issue Type","type":"select","required":true,"options":[{"value":"Task","label":"Task"},{"value":"Bug","label":"Bug"},{"value":"Story","label":"Story"},{"value":"Epic","label":"Epic"}]},
+    <INCLUDE priority ONLY if get_fields shows supports.priority=true>,
     {"id":"priority","label":"Priority","type":"select","required":true,"options":"{{get_pri}}"},
     <OMIT assignee field if assignee name was stated — resolve from fetch_users>,
     {"id":"assignee","label":"Assignee","type":"select","required":false,"options":"{{fetch_users}}"},
-    {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?"}
+    <INCLUDE story_points ONLY if get_fields shows supports.story_points=true>,
+    {"id":"story_points","label":"Story Points","type":"number","required":false,"placeholder":"e.g. 3"},
+    <INCLUDE labels ONLY if get_fields shows supports.labels=true>,
+    {"id":"labels","label":"Labels","type":"text","required":false,"placeholder":"comma-separated labels"},
+    {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?"},
+    {"id":"attachment","label":"Attach file? (enter local file path or leave blank)","type":"text","required":false,"placeholder":"/path/to/file.png"}
   ]},"success_criteria":"All task details collected"},
-  {"id":"gen_desc","tool":"llm_draft_content","params":{"content_type":"issue_description","topic":"{{collect_info.desc_topic}}","context":"{{collect_info.issue_type}} in {{sel_proj.selected}}: {{collect_info.summary}}, priority {{collect_info.priority}}"},"success_criteria":"Description drafted"},
+  {"id":"gen_desc","tool":"llm_draft_content","params":{"content_type":"issue_description","topic":"{{collect_info.desc_topic}}","context":"{{collect_info.issue_type}} in {{sel_proj.selected}}: {{collect_info.summary}}"},"success_criteria":"Description drafted"},
   {"id":"edit_desc","tool":"request_edit","params":{"label":"Issue Description","content":"{{gen_desc.content}}"},"success_criteria":"Description reviewed"},
   {"id":"create_issue","tool":"jira_create_issue","params":{"project_key":"{{sel_proj.selected}}","issue_type":"{{collect_info.issue_type}}","summary":"{{collect_info.summary}}","description":"{{edit_desc.content}}"},"success_criteria":"Issue created"},
   {"id":"upd_issue","tool":"jira_update_issue","params":{"issue_key":"{{create_issue.key}}","fields":{"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"}},"success_criteria":"Priority and assignee set"},
+  <INCLUDE attachment step ONLY if user provided a file path in collect_info.attachment>,
+  {"id":"attach","tool":"jira_add_attachment","params":{"issue_key":"{{create_issue.key}}","file_path":"{{collect_info.attachment}}"},"success_criteria":"Attachment uploaded"},
   {"id":"get_created","tool":"jira_get_issue","params":{"issue_key":"{{create_issue.key}}"},"success_criteria":"Issue details fetched"},
   {"id":"done","tool":"direct_response","params":{"message":"Issue created successfully!\n\nKey: {{create_issue.key}}\nSummary: {{collect_info.summary}}\nType: {{collect_info.issue_type}}\nPriority: {{collect_info.priority}}\nAssignee: {{collect_info.assignee}}\n\nFull details:\n{{get_created}}"}}
 
 ⚑ EVERY field dict MUST include an "id" key.
 ⚑ summary: pre-fill as default when user gave a clear title; only require when truly absent.
-⚑ priority is required ONLY when user did not state an exact priority name.
-⚑ assignee: when user names a person, match against fetch_users (case-insensitive, first name ok) and hardcode — do NOT show assignee field.
+⚑ priority: include ONLY if get_fields shows supports.priority=true AND user did not state priority.
+⚑ story_points: include ONLY if get_fields shows supports.story_points=true.
+⚑ labels: include ONLY if get_fields shows supports.labels=true.
+⚑ attachment: ALWAYS include as optional text field — user can leave blank if no file.
+⚑ attachment step (jira_add_attachment): ONLY add to plan if collect_info.attachment is non-empty.
+⚑ assignee: when user names a person, match against fetch_users and hardcode — do NOT show assignee field.
 ⚑ issue_type: when user states type ("bug", "task", "story", "epic") → omit field, hardcode in create_issue.
 ⚑ NEVER show a field for something the user already told you.
 
