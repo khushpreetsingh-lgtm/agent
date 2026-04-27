@@ -39,10 +39,10 @@ class MasterAgent:
         logger.info("MasterAgent ready (unified PEV) with AsyncSqliteSaver")
 
     def _build_graph(self) -> None:
-        from dqe_agent.agent.loop import build_pev_graph
-        graph = build_pev_graph()
+        from dqe_agent.agent.orchestrator import build_orchestrator_graph
+        graph = build_orchestrator_graph()
         self._graph = graph.compile(checkpointer=self.checkpointer)
-        logger.info("Compiled unified PEV graph")
+        logger.info("Compiled orchestrator graph (orchestrator → pev_subgraph → aggregator)")
 
     def get_app(self) -> Any:
         """Return the compiled PEV graph."""

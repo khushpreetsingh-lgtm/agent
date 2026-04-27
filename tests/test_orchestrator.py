@@ -47,3 +47,12 @@ def test_decompose_tasks_multi():
     agent_ids = {t["agent"] for t in tasks}
     assert "jira" in agent_ids
     assert "calendar" in agent_ids
+
+
+def test_build_orchestrator_graph():
+    from dqe_agent.agent.orchestrator import build_orchestrator_graph
+    graph = build_orchestrator_graph()
+    assert graph is not None
+    # Should compile without error
+    compiled = graph.compile()
+    assert compiled is not None

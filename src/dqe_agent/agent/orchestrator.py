@@ -129,3 +129,41 @@ async def aggregator_node(state: AgentState) -> dict:
 
     combined = "\n\n---\n\n".join(str(r) for r in responses if r)
     return {"status": "complete", "sub_results": sub_results}
+
+
+def build_orchestrator_graph():
+    """Build the full orchestrator graph: orchestrator → PEV sub-graph → aggregator."""
+    from langgraph.graph import END, START, StateGraph
+    from dqe_agent.agent.loop import build_pev_graph
+
+    builder = StateGraph(AgentState)
+
+    # Nodes
+    builder.add_node("orchestrator", orchestrator_node)
+    builder.add_node("aggregator", aggregator_node)
+
+    # PEV sub-graph — compiled once, reused for all sub-agents
+    # agent_id in state selects the tool filter inside planner/executor
+    pev = build_pev_graph()
+    builder.add_node("pev_subgraph", pev.compile())
+
+    # Edges
+    builder.add_edge(START, "orchestrator")
+
+    # orchestrator → either pev_subgraph (single) or Send fan-out (multi)
+    def _route_after_orchestrator(state: AgentState):
+        tasks = state.get("orchestrator_tasks", [])
+        if len(tasks) <= 1:
+            return "pev_subgraph"
+        return "aggregator"  # Send already dispatched sub-graphs
+
+    builder.add_conditional_edges(
+        "orchestrator",
+        _route_after_orchestrator,
+        {"pev_subgraph": "pev_subgraph", "aggregator": "aggregator"},
+    )
+
+    builder.add_edge("pev_subgraph", "aggregator")
+    builder.add_edge("aggregator", END)
+
+    return builder
