@@ -167,3 +167,58 @@ def build_orchestrator_graph():
     builder.add_edge("aggregator", END)
 
     return builder
+
+
+class ProactiveMonitor:
+    """Background task that polls agent proactive prompts and broadcasts alerts."""
+
+    def __init__(self, broadcast_fn) -> None:
+        self._broadcast = broadcast_fn
+        self._stopped = False
+        self._next_run: dict[str, float] = {}  # agent_id → next_run_epoch
+
+    def stop(self) -> None:
+        self._stopped = True
+
+    async def start(self) -> None:
+        import time
+        from dqe_agent.agents import get_all_agents
+
+        logger.info("[PROACTIVE] Monitor started")
+        while not self._stopped:
+            now = time.monotonic()
+            for agent in get_all_agents():
+                if agent.proactive is None:
+                    continue
+                next_run = self._next_run.get(agent.agent_id, 0.0)
+                if now < next_run:
+                    continue
+                self._next_run[agent.agent_id] = now + agent.proactive.interval_seconds
+                asyncio.create_task(self._run_agent_check(agent))
+            await asyncio.sleep(10)  # check every 10s, actual intervals controlled per agent
+        logger.info("[PROACTIVE] Monitor stopped")
+
+    async def _run_agent_check(self, agent) -> None:
+        """Run one proactive check for an agent and broadcast if noteworthy."""
+        try:
+            from dqe_agent.llm import get_executor_llm
+            from langchain_core.messages import SystemMessage
+
+            llm = get_executor_llm()
+            prompt = (
+                f"You are a proactive monitor for the {agent.agent_id} domain.\n"
+                f"{agent.proactive.prompt}\n"
+                "If you find something noteworthy, respond with a concise one-paragraph alert. "
+                "If nothing needs attention, respond with exactly: NO_ALERT"
+            )
+            result = await llm.ainvoke([SystemMessage(content=prompt)])
+            content = result.content if hasattr(result, "content") else str(result)
+            if content and "NO_ALERT" not in content:
+                await self._broadcast({
+                    "type": "proactive_alert",
+                    "agent": agent.agent_id,
+                    "content": content,
+                })
+                logger.info("[PROACTIVE] Alert from %s: %s", agent.agent_id, content[:80])
+        except Exception as exc:
+            logger.warning("[PROACTIVE] Check failed for %s: %s", agent.agent_id, exc)
