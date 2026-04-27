@@ -30,6 +30,7 @@ SERVER → CLIENT
                                  "multi_select": false}
   {"type": "workflow_done",      "summary": "..."}
   {"type": "error",              "message": "..."}
+  {"type": "proactive_alert",    "agent": "jira", "content": "3 overdue tickets in Sprint 24"}
   {"type": "pong"}
 
 CLIENT → SERVER (additional)
