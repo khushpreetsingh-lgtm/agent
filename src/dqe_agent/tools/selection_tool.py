@@ -114,6 +114,41 @@ async def request_selection(
     })
 
     result_str = str(result) if result is not None else ""
+
+    # Validate returned value is one of the valid option values.
+    # Frontend may send free-text chat messages while a selection is pending.
+    valid_values = {str(o["value"]) for o in cleaned}
+    valid_labels = {str(o["label"]).lower() for o in cleaned}
+    if result_str not in valid_values:
+        # Try case-insensitive label match → map back to value
+        _matched = next(
+            (o["value"] for o in cleaned if o["label"].lower() == result_str.lower()),
+            None,
+        )
+        if _matched:
+            result_str = _matched
+        else:
+            # Invalid selection — re-interrupt with same question
+            logger.warning(
+                "[request_selection] invalid selection %r (not in options) — re-prompting",
+                result_str,
+            )
+            result2 = interrupt({
+                "type": "selection",
+                "question": question,
+                "options": cleaned,
+                "multi_select": multi_select,
+                "error": f"'{result_str}' is not a valid option. Please select one of the options below.",
+            })
+            result_str = str(result2) if result2 is not None else ""
+            # Accept whatever comes back (don't loop infinitely)
+            if result_str not in valid_values:
+                _matched2 = next(
+                    (o["value"] for o in cleaned if o["label"].lower() == result_str.lower()),
+                    None,
+                )
+                result_str = _matched2 or cleaned[0]["value"]
+
     logger.info(
         "[request_selection] question=%r  selected=%r  multi=%s",
         question, result_str, multi_select,
