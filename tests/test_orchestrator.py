@@ -2,34 +2,70 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 
-def test_classify_single_domain():
+@pytest.mark.asyncio
+async def test_classify_single_domain():
     from dqe_agent.agent.orchestrator import classify_domains
     from dqe_agent.agents import register_agent, AgentConfig
+    from langchain_core.messages import HumanMessage, AIMessage
+    from unittest.mock import AsyncMock, patch
 
     class _J(AgentConfig):
         agent_id = "jira"
+        description = "Jira ticket management"
         domains = ["jira", "ticket", "issue"]
         tools = ["direct_response"]
         system_prompt = ""
     register_agent(_J())
 
-    domains = classify_domains("Create a Jira ticket for the login bug", {"jira": "jira"})
-    assert "jira" in domains
+    messages = [HumanMessage(content="Create a Jira ticket for the login bug")]
+    agent_descriptions = {"jira": "Jira ticket management", "browser": "Web navigation"}
+
+    # Mock LLM response
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content='{"agents": ["jira"]}'))
+
+    with patch("dqe_agent.llm.get_planner_llm", return_value=mock_llm):
+        domains = await classify_domains("Create a Jira ticket for the login bug", messages, agent_descriptions)
+        assert "jira" in domains
 
 
-def test_classify_multi_domain():
+@pytest.mark.asyncio
+async def test_classify_multi_domain():
     from dqe_agent.agent.orchestrator import classify_domains
+    from langchain_core.messages import HumanMessage, AIMessage
+    from unittest.mock import AsyncMock, patch
 
-    idx = {"jira": "jira", "ticket": "jira", "meeting": "calendar", "schedule": "calendar"}
-    domains = classify_domains("Create a ticket and schedule a meeting", idx)
-    assert "jira" in domains
-    assert "calendar" in domains
+    messages = [HumanMessage(content="Create a ticket and schedule a meeting")]
+    agent_descriptions = {
+        "jira": "Jira tickets and issues",
+        "calendar": "Calendar events and meetings",
+        "browser": "Web navigation"
+    }
+
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content='{"agents": ["jira", "calendar"]}'))
+
+    with patch("dqe_agent.llm.get_planner_llm", return_value=mock_llm):
+        domains = await classify_domains("Create a ticket and schedule a meeting", messages, agent_descriptions)
+        assert "jira" in domains
+        assert "calendar" in domains
 
 
-def test_classify_no_match_returns_browser():
+@pytest.mark.asyncio
+async def test_classify_no_match_returns_browser():
     from dqe_agent.agent.orchestrator import classify_domains
-    domains = classify_domains("Do something weird and unusual xyz", {})
-    assert domains == ["browser"]
+    from langchain_core.messages import HumanMessage, AIMessage
+    from unittest.mock import AsyncMock, patch
+
+    messages = [HumanMessage(content="Do something weird and unusual xyz")]
+    agent_descriptions = {"jira": "Jira tickets", "browser": "Web navigation"}
+
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content='{"agents": ["browser"]}'))
+
+    with patch("dqe_agent.llm.get_planner_llm", return_value=mock_llm):
+        domains = await classify_domains("Do something weird and unusual xyz", messages, agent_descriptions)
+        assert domains == ["browser"]
 
 
 def test_decompose_tasks_single():

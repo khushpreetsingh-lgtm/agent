@@ -40,16 +40,66 @@ Rules:
 - Output ONLY the JSON — no explanation, no markdown."""
 
 
-def classify_domains(message: str, domain_index: dict[str, str]) -> list[str]:
-    """Fast keyword-based domain classification. Returns list of agent_ids."""
-    msg_lower = message.lower()
-    matched: dict[str, bool] = {}
-    for keyword, agent_id in domain_index.items():
-        if keyword in msg_lower:
-            matched[agent_id] = True
-    if not matched:
+async def classify_domains(
+    message: str,
+    conversation_history: list,
+    agent_descriptions: dict[str, str],
+) -> list[str]:
+    """LLM-based domain classification using conversation context."""
+    from dqe_agent.llm import get_planner_llm
+
+    # Format last 3 messages for context
+    history_text = ""
+    human_msgs = [m for m in conversation_history if isinstance(m, HumanMessage)]
+    if len(human_msgs) > 1:
+        recent = human_msgs[-3:]
+        history_text = "\n".join([f"User: {m.content}" for m in recent])
+
+    # Build agent descriptions
+    agent_list = "\n".join([f"- {aid}: {desc}" for aid, desc in agent_descriptions.items()])
+
+    prompt = f"""Classify which specialist agents are needed for this user message.
+
+Available agents:
+{agent_list}
+
+Recent conversation context:
+{history_text if history_text else "(no prior context)"}
+
+New user message: "{message}"
+
+Instructions:
+- Output agent IDs that match the user's intent
+- Consider conversation context (e.g., "show more" continues previous agent)
+- If message spans multiple domains, output multiple agents
+- If no domain matches or very ambiguous, output ["browser"]
+- Output ONLY valid JSON array of agent IDs
+
+Output JSON: {{"agents": ["agent_id", ...]}}"""
+
+    llm = get_planner_llm()
+    try:
+        result = await llm.ainvoke([SystemMessage(content=prompt)])
+        content = result.content if hasattr(result, "content") else str(result)
+
+        # Strip markdown if present
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+        parsed = json.loads(content)
+        agents = parsed.get("agents", ["browser"])
+
+        # Validate agent IDs
+        valid_agents = [a for a in agents if a in agent_descriptions]
+        if not valid_agents:
+            logger.warning("[ORCHESTRATOR] LLM returned invalid agents %s, fallback to browser", agents)
+            return ["browser"]
+
+        return valid_agents
+    except Exception as exc:
+        logger.warning("[ORCHESTRATOR] LLM classification failed: %s, fallback to browser", exc)
         return ["browser"]
-    return list(matched.keys())
 
 
 def decompose_tasks(message: str, agent_ids: list[str]) -> list[dict[str, str]]:
@@ -67,7 +117,7 @@ def decompose_tasks(message: str, agent_ids: list[str]) -> list[dict[str, str]]:
 
 async def orchestrator_node(state: AgentState) -> dict | list[Send]:
     """LangGraph node: classify message → single agent or parallel Send fan-out."""
-    from dqe_agent.agents import build_domain_index, get_agent
+    from dqe_agent.agents import get_agent, get_all_agents
 
     messages = state.get("messages", [])
     if not messages:
@@ -82,8 +132,13 @@ async def orchestrator_node(state: AgentState) -> dict | list[Send]:
 
     message_text = last_human.content if isinstance(last_human.content, str) else str(last_human.content)
 
-    domain_index = build_domain_index()
-    agent_ids = classify_domains(message_text, domain_index)
+    # Build agent descriptions for LLM
+    agent_descriptions = {
+        agent.agent_id: agent.description or f"Handles: {', '.join((agent.domains or [])[:5])}"
+        for agent in get_all_agents()
+    }
+
+    agent_ids = await classify_domains(message_text, messages, agent_descriptions)
 
     logger.info("[ORCHESTRATOR] message=%r → agents=%s", message_text[:80], agent_ids)
 
