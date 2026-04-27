@@ -2380,6 +2380,16 @@ async def _normalize_tool_params(
                 if _m2:
                     _name_frag = _m2.group(1).strip()
                     break
+            # Skip name-fragment filtering for generic non-person words
+            _NON_PERSON_WORDS = {
+                "board", "project", "sprint", "issue", "ticket", "task", "bug",
+                "story", "epic", "team", "member", "user", "assignee", "role",
+                "priority", "status", "type", "label", "version", "component",
+                "option", "item", "one", "which", "that", "this",
+            }
+            if _name_frag and _name_frag.lower() in _NON_PERSON_WORDS:
+                _name_frag = None
+
             if _name_frag:
                 _frag_lower = _name_frag.lower()
                 _all_opts = params["options"]
