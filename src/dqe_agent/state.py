@@ -95,3 +95,8 @@ class AgentState(TypedDict, total=False):
     # ── Browser (legacy / ReAct compat) ──────────────────────────────────
     browser_ready: Annotated[bool, _replace]
     current_task: Annotated[str | None, _replace]
+
+    # ── Multi-agent orchestration ─────────────────────────────────────────
+    agent_id: Annotated[str, _replace]              # sub-agent running this PEV instance
+    orchestrator_tasks: Annotated[list, _replace]   # tasks decomposed by orchestrator
+    sub_results: Annotated[list, _replace]          # aggregated results from parallel sub-agents

@@ -49,3 +49,12 @@ def test_proactive_config():
     pc = ProactiveConfig(interval_seconds=60, prompt="Check for issues")
     assert pc.interval_seconds == 60
     assert pc.prompt == "Check for issues"
+
+
+def test_agent_state_has_new_fields():
+    from dqe_agent.state import AgentState
+    # TypedDict fields are accessible via __annotations__
+    annotations = AgentState.__annotations__
+    assert "agent_id" in annotations
+    assert "orchestrator_tasks" in annotations
+    assert "sub_results" in annotations
