@@ -110,12 +110,14 @@ def _format_task(row: dict) -> dict:
 # ── Shared singletons ───────────────────────────────────────────────────────
 browser_manager: BrowserManager | None = None
 master_agent: MasterAgent | None = None
+_proactive_monitor_task: asyncio.Task | None = None
 
 # ── Per-session state ────────────────────────────────────────────────────────
 _human_queues: dict[str, asyncio.Queue] = {}
 _awaiting_input: set[str] = set()
 _session_browsers: dict[str, Any] = {}
 _session_tasks: dict[str, asyncio.Task] = {}
+_active_websockets: set[WebSocket] = set()
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
@@ -183,7 +185,31 @@ async def lifespan(app: FastAPI):
     tools = list_tool_names()
     logger.info("DQE Agent ready — %d tools loaded", len(tools))
 
+    # Start proactive monitor
+    global _proactive_monitor_task
+    from dqe_agent.agent.orchestrator import ProactiveMonitor
+
+    async def _broadcast_alert(msg: dict) -> None:
+        for ws in _active_websockets:
+            try:
+                await ws.send_json(msg)
+            except Exception as exc:
+                logger.warning("Failed to broadcast proactive alert: %s", exc)
+
+    monitor = ProactiveMonitor(broadcast_fn=_broadcast_alert)
+    _proactive_monitor_task = asyncio.create_task(monitor.start())
+    logger.info("ProactiveMonitor started")
+
     yield
+
+    # Stop proactive monitor
+    if _proactive_monitor_task:
+        monitor.stop()
+        try:
+            await asyncio.wait_for(_proactive_monitor_task, timeout=2.0)
+        except asyncio.TimeoutError:
+            _proactive_monitor_task.cancel()
+        logger.info("ProactiveMonitor stopped")
 
     if browser_manager:
         await browser_manager.stop()
@@ -227,6 +253,8 @@ async def _run_with_browser(bm: Any, session_id: str, coro) -> None:
 async def websocket_endpoint(ws: WebSocket, session_id: str):
     await ws.accept()
     logger.info("[%s] WebSocket connected", session_id)
+
+    _active_websockets.add(ws)
 
     human_q: asyncio.Queue = asyncio.Queue()
     _human_queues[session_id] = human_q
@@ -329,6 +357,7 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
     except (WebSocketDisconnect, RuntimeError):
         logger.info("[%s] WebSocket disconnected", session_id)
     finally:
+        _active_websockets.discard(ws)
         # Guard: only clean up state owned by THIS connection.
         # If the frontend reconnected with the same session_id, a new connection
         # already registered fresh objects — don't clobber them.
