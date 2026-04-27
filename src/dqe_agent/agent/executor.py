@@ -1043,6 +1043,40 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
         params = dict(params)
         params["fields"] = resolved_fields
 
+        # ── Strip unsupported fields based on jira_get_project_fields result ──
+        _supports = None
+        for _sr in step_results:
+            if not isinstance(_sr, dict) or _sr.get("tool") != "jira_get_project_fields":
+                continue
+            try:
+                _gf = json.loads(_sr["result"]) if isinstance(_sr.get("result"), str) else _sr.get("result")
+                if isinstance(_gf, dict) and "supports" in _gf:
+                    _supports = _gf["supports"]
+                    break
+            except Exception:
+                pass
+        if _supports:
+            _FIELD_SUPPORT_MAP = {
+                "priority": "priority",
+                "story_points": "story_points",
+                "sprint": "sprint",
+                "components": "components",
+                "labels": "labels",
+                "fix_versions": "fix_versions",
+            }
+            filtered_fields = []
+            for _field in params["fields"]:
+                _fid = _field.get("id", "")
+                _support_key = _FIELD_SUPPORT_MAP.get(_fid)
+                if _support_key and not _supports.get(_support_key, True):
+                    logger.info(
+                        "[EXECUTOR] Dropping unsupported form field '%s' (supports.%s=False)",
+                        _fid, _support_key,
+                    )
+                    continue
+                filtered_fields.append(_field)
+            params["fields"] = filtered_fields
+
 
     resolved_params = _resolve_params(params, flow_data, results_by_id)
 
@@ -3350,6 +3384,23 @@ async def _normalize_tool_params(
                 # Drop empty values (user left field blank)
                 if isinstance(_fv, str) and not _fv.strip():
                     logger.info("[EXECUTOR] jira_update_issue: skipping empty field %r", _fk)
+                    continue
+
+                # Drop fields unsupported by this project (from jira_get_project_fields)
+                _upd_supports = None
+                for _sr2 in step_results:
+                    if not isinstance(_sr2, dict) or _sr2.get("tool") != "jira_get_project_fields":
+                        continue
+                    try:
+                        _gf2 = json.loads(_sr2["result"]) if isinstance(_sr2.get("result"), str) else _sr2.get("result")
+                        if isinstance(_gf2, dict) and "supports" in _gf2:
+                            _upd_supports = _gf2["supports"]
+                            break
+                    except Exception:
+                        pass
+                _SUPPORT_CHECK = {"priority": "priority", "story_points": "story_points", "sprint": "sprint"}
+                if _upd_supports and _fk in _SUPPORT_CHECK and not _upd_supports.get(_SUPPORT_CHECK[_fk], True):
+                    logger.info("[EXECUTOR] jira_update_issue: dropping unsupported field %r (supports.%s=False)", _fk, _fk)
                     continue
 
                 _rf[_fk] = _fv
