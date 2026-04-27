@@ -694,8 +694,12 @@ To retrieve active sprints (e.g. "what is the active sprint for me?", "status of
     {"id":"active","tool":"jira_get_sprints_from_board","params":{"board_id":"{{sel_board.selected}}","state":"active"},"success_criteria":"Active sprints loaded"},
     {"id":"sel_sprint","tool":"request_selection","params":{"question":"Which active sprint?","options":"{{active}}","multi_select":false},"success_criteria":"Sprint selected"},
     {"id":"issues","tool":"jira_get_sprint_issues","params":{"sprint_id":"{{sel_sprint.selected}}","limit":50},"success_criteria":"Sprint issues fetched"},
-    {"id":"show","tool":"direct_response","params":{"message":"Sprint issues:\n{{issues}}"}}
+    {"id":"show","tool":"direct_response","params":{"message":"**Sprint:** {{active}}\n\n{{issues}}"}}
   ]
+
+  ⚑ Sprint board message MUST include sprint name/dates from {{active}} AND the issue list from {{issues}}.
+  The {{active}} resolves to the sprint object — it contains name, startDate, endDate, state.
+  The executor formats the issue list with status breakdown automatically via _format_result_for_display.
 
   Example — just show sprint info (no issues needed), project IS stated ("current sprint in FLAG"):
   [

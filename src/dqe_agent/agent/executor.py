@@ -390,6 +390,24 @@ def _format_result_for_display(raw: str) -> str:
     except (json.JSONDecodeError, TypeError):
         return raw
 
+    # ── Sprint object or list of sprint objects ──────────────────────────────
+    def _fmt_sprint(s: dict) -> str:
+        name = s.get("name", "Unknown sprint")
+        state = s.get("state", "")
+        start = (s.get("startDate") or s.get("start_date") or "")[:10]
+        end = (s.get("endDate") or s.get("end_date") or "")[:10]
+        parts = [f"**{name}**"]
+        if state:
+            parts.append(f"({state})")
+        if start and end:
+            parts.append(f"{start} → {end}")
+        return " ".join(parts)
+
+    if isinstance(data, list) and data and isinstance(data[0], dict) and "name" in data[0] and ("startDate" in data[0] or "state" in data[0] or "start_date" in data[0]):
+        return "\n".join(_fmt_sprint(s) for s in data)
+    if isinstance(data, dict) and "name" in data and ("startDate" in data or "state" in data or "start_date" in data):
+        return _fmt_sprint(data)
+
     # ── Jira search result: {"total": N, "issues": [...]} ───────────────────
     if isinstance(data, dict) and "issues" in data:
         issues = data.get("issues", [])
@@ -459,7 +477,21 @@ def _format_result_for_display(raw: str) -> str:
         else:
             _label = "issue"
             _label_pl = "issues"
-        header = f"**{count} {_label_pl if count != 1 else _label} found:**\n\n"
+        # Status breakdown
+        _status_counts: dict[str, int] = {}
+        for _iss in issues:
+            _f = _iss.get("fields", _iss)
+            _st = _f.get("status") or _iss.get("status")
+            _stn = (_st.get("name") if isinstance(_st, dict) else str(_st or "")).strip()
+            if _stn:
+                _status_counts[_stn] = _status_counts.get(_stn, 0) + 1
+        _status_line = ""
+        if _status_counts:
+            _done = sum(v for k, v in _status_counts.items() if "done" in k.lower() or "closed" in k.lower() or "complete" in k.lower())
+            _in_prog = sum(v for k, v in _status_counts.items() if "progress" in k.lower() or "review" in k.lower() or "testing" in k.lower())
+            _todo = count - _done - _in_prog
+            _status_line = f" — ✅ {_done} done, 🔄 {_in_prog} in progress, 📋 {_todo} to do"
+        header = f"**{count} {_label_pl if count != 1 else _label} found{_status_line}:**\n\n"
         return header + "\n\n".join(blocks)
 
     # ── Worklog result: {"project": ..., "users": [...]} ────────────────────
