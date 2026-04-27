@@ -1433,10 +1433,11 @@ To retrieve active sprints (e.g. "what is the active sprint for me?", "status of
    {"id":"show","tool":"direct_response","params":{"message":"Risky tickets in active sprint:\n{{s}}"}}]
 
   "Summarize sprint progress":
-  [{"id":"total","tool":"jira_search","params":{"jql":"sprint in openSprints()","limit":1},"success_criteria":"Total count fetched"},
-   {"id":"done_sp","tool":"jira_search","params":{"jql":"sprint in openSprints() AND status = Done","limit":1},"success_criteria":"Done count fetched"},
-   {"id":"blocked","tool":"jira_search","params":{"jql":"sprint in openSprints() AND priority = Blocker AND status != Done","limit":10},"success_criteria":"Blockers fetched"},
-   {"id":"show","tool":"direct_response","params":{"message":"**Sprint Progress**\nTotal: {{total.total}} | Done: {{done_sp.total}} | Blockers: {{blocked.total}}\n\nBlockers:\n{{blocked}}"}}]
+  ⚑ Jira Cloud returns total=-1 — NEVER use {{step.total}} for counts. Count from issues array only.
+  [{"id":"total","tool":"jira_search","params":{"jql":"sprint in openSprints()","limit":50},"success_criteria":"Sprint issues fetched"},
+   {"id":"done_sp","tool":"jira_search","params":{"jql":"sprint in openSprints() AND status = Done","limit":50},"success_criteria":"Done issues fetched"},
+   {"id":"blocked","tool":"jira_search","params":{"jql":"sprint in openSprints() AND (priority = Blocker OR labels = Blocked) AND status != Done","limit":10},"success_criteria":"Blockers fetched"},
+   {"id":"show","tool":"direct_response","params":{"message":"**Sprint Progress**\n\n**All Issues:**\n{{total}}\n\n**Done:**\n{{done_sp}}\n\n**Active Blockers:**\n{{blocked}}"}}]
 
   "Detect blockers automatically" → same as "Which tickets are risky?" above.
 

@@ -3774,7 +3774,11 @@ def _resolve_ref_to_object(ref: str, flow_data: dict, results_by_id: dict) -> An
                     # (e.g. template says .boards but data is under .values / ._items)
                     extracted = _extract_items_from_response(obj)
                     return extracted if extracted else None
-                obj = val
+                # Jira Cloud returns total=-1 (unknown) — substitute real count from issues array
+                if p == "total" and obj == -1 and isinstance(root, dict) and "issues" in root:
+                    obj = len(root["issues"])
+                else:
+                    obj = val
             elif isinstance(obj, list) and p.isdigit():
                 obj = obj[int(p)]
             elif isinstance(obj, list):
