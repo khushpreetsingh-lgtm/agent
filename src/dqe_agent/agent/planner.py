@@ -406,11 +406,15 @@ OUTPUT RULES:
 10. ⚑ PAGINATION RULES (CRITICAL — READ CAREFULLY):
    • jira_search and jira_get_sprint_issues return at most 50 results at a time.
    • When PAGINATION CONTEXT is present in AVAILABLE DATA (look for "PAGINATION CONTEXT" section):
-     - If user says "next" / "more" / "show more" / "continue" → ONLY use jira_search with the exact query + start_at or page_token from context
+     - If user says "next" / "more" / "show more" / "continue":
+       COPY the JQL string from "Query/sprint:" in PAGINATION CONTEXT VERBATIM — character for character.
+       DO NOT shorten it, DO NOT remove any AND clauses, DO NOT reconstruct it from memory.
+       Use the start_at or page_token value from PAGINATION CONTEXT.
      - DO NOT re-ask for project, assignee, or any other parameters — ALL values are in PAGINATION CONTEXT
-     - DO NOT create multi-step plans — pagination is a SINGLE tool call with incremented start_at
-     - Example plan when user says "show more":
-       [{"id":"fetch","tool":"jira_search","params":{"jql":"<exact jql from context>","start_at":<next_start_at from context>,"limit":50}}]
+     - DO NOT create multi-step plans — pagination is a SINGLE tool call
+     - Example: if PAGINATION CONTEXT shows Query/sprint: assignee = "X" AND project = AMA ORDER BY updated DESC
+       → plan MUST be: [{"id":"fetch","tool":"jira_search","params":{"jql":"assignee = \"X\" AND project = AMA ORDER BY updated DESC","start_at":50,"limit":50}}]
+       NEVER drop the AND project = AMA part. NEVER simplify.
    • For sprint issues pagination: jira_get_sprint_issues has no start_at — use jira_search with
      jql="sprint = <sprint_id>" + start_at for any page after the first.
    • If no PAGINATION CONTEXT exists, treat as new query (full plan needed).

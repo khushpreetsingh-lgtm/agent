@@ -285,14 +285,27 @@ def _step_message(
         try:
             parsed = json.loads(result) if isinstance(result, str) else result
             if isinstance(parsed, dict):
-                # Show a few key fields — id, name, key, summary, etc.
-                for key in ("id", "name", "key", "summary", "sprint", "sprintId", "self"):
-                    if key in parsed:
-                        brief = f" → {key}: {parsed[key]}"
-                        break
-                if not brief:
-                    first_val = next(iter(parsed.values()), "")
-                    brief = f" → {str(first_val)[:80]}"
+                # Search/list result: show issue count
+                issues = parsed.get("issues") or parsed.get("_items")
+                if issues is not None:
+                    real_total = parsed.get("total", -1)
+                    count = len(issues)
+                    if real_total and real_total > 0 and real_total != count:
+                        brief = f" → {count} of {real_total} item(s) returned"
+                    else:
+                        brief = f" → {count} item(s) returned"
+                else:
+                    # Show a few key fields — id, name, key, summary, etc.
+                    for key in ("id", "name", "key", "summary", "sprint", "sprintId", "self"):
+                        if key in parsed:
+                            brief = f" → {key}: {parsed[key]}"
+                            break
+                    if not brief:
+                        # Skip -1 / negative sentinel values as they're meaningless
+                        for v in parsed.values():
+                            if v is not None and v != -1 and str(v).strip() not in ("-1", ""):
+                                brief = f" → {str(v)[:80]}"
+                                break
             elif isinstance(parsed, list):
                 brief = f" → {len(parsed)} item(s) returned"
         except Exception:
@@ -430,8 +443,23 @@ def _format_result_for_display(raw: str) -> str:
 
             blocks.append(f"{title}\n{meta_line}")
 
-        count = len(issues) if total < 0 else total
-        header = f"**{count} issue{'s' if count != 1 else ''} found:**\n\n"
+        count = len(issues)
+        # Determine dominant issue type from results for friendlier label
+        _type_counts: dict[str, int] = {}
+        for _iss in issues:
+            _f = _iss.get("fields", _iss)
+            _it = (_f.get("issuetype") or {})
+            _itn = _it.get("name") if isinstance(_it, dict) else str(_it)
+            if _itn:
+                _type_counts[_itn.lower()] = _type_counts.get(_itn.lower(), 0) + 1
+        _dominant = max(_type_counts, key=_type_counts.get) if _type_counts else None
+        if _dominant and len(_type_counts) == 1:
+            _label = _dominant  # e.g. "task", "bug", "story"
+            _label_pl = _label + "s" if not _label.endswith("s") else _label
+        else:
+            _label = "issue"
+            _label_pl = "issues"
+        header = f"**{count} {_label_pl if count != 1 else _label} found:**\n\n"
         return header + "\n\n".join(blocks)
 
     # ── Worklog result: {"project": ..., "users": [...]} ────────────────────
