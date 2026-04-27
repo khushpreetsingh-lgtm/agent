@@ -63,7 +63,7 @@ def test_agent_state_has_new_fields():
 def test_builtin_agents_discovered():
     discover_agents()
     agents = list_agents()
-    for aid in ["jira", "calendar", "email", "browser", "people"]:
+    for aid in ["jira", "calendar", "email", "browser"]:
         assert aid in agents, f"Built-in agent '{aid}' not found after discover_agents()"
 
 

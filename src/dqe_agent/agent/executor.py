@@ -1790,7 +1790,7 @@ def _strip_invalid_params(tool_name: str, params: dict) -> dict:
     return params
 
 
-def _pre_strip_remap(tool_name: str, params: dict) -> dict:
+def _pre_strip_remap(tool_name: str, params: dict, flow_data: dict | None = None, results_by_id: dict | None = None) -> dict:
     """Remap wrong param names to correct ones BEFORE _strip_invalid_params runs.
 
     _strip_invalid_params removes anything not in the tool's schema. If the planner
@@ -2095,7 +2095,7 @@ async def _normalize_tool_params(
 
     # ── Pre-strip: remap wrong param names BEFORE schema validation strips them ─
     # These run first so wrong-named params survive into the correct-named slots.
-    params = _pre_strip_remap(tool_name, params)
+    params = _pre_strip_remap(tool_name, params, flow_data, results_by_id)
 
     # ── Save out-of-schema hints before stripping so specific blocks can use them ─
     # _target_status is passed by the planner as a hint for transition matching.
