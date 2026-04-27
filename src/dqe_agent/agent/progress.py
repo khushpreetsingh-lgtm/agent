@@ -74,12 +74,16 @@ _MAP: dict[str, tuple[str, str, str]] = {
     # ── Google Calendar reads ─────────────────────────────────────────────────
     "get_events":         ("reading", "Checking your calendar...",               "Got your calendar events"),
     "list_events":        ("reading", "Checking your calendar...",               "Got your calendar events"),
-    "query_freebusy":     ("reading", "Checking when you are free...",           "Got your availability"),
+    "query_freebusy":     ("reading", "Checking when you are free...",           "Got your availability"),  # legacy alias
+
     "list_calendars":     ("reading", "Loading your calendars...",               "Calendars are ready"),
     "get_calendars":      ("reading", "Loading your calendars...",               "Calendars are ready"),
 
     # ── Google Calendar writes ────────────────────────────────────────────────
-    "manage_event":       ("creating", "Saving the event to your calendar...",   "Event added to your calendar"),
+    "manage_event":       ("creating", "Saving the event to your calendar...",   "Event added to your calendar"),  # legacy alias
+    "create_event":       ("creating", "Adding the event to your calendar...",   "Event added to your calendar"),
+    "modify_event":       ("updating", "Updating the event...",                  "Event updated"),
+    "delete_event":       ("deleting", "Removing the event...",                  "Event removed"),
 
     # ── Browser ──────────────────────────────────────────────────────────────
     "browser_login":      ("browser", "Logging you in...",                       "Logged in successfully"),

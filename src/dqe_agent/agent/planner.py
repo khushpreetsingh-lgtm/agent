@@ -1,4 +1,4 @@
-"""Planner node — generates a structured step-by-step plan from a task description.
+﻿"""Planner node — generates a structured step-by-step plan from a task description.
 
 Uses a LARGE model (Opus / GPT-4o / o1) but runs only ONCE per task.
 This is where the expensive thinking happens — the executor just follows the plan.
@@ -19,28 +19,6 @@ from dqe_agent.guardrails import COST_PER_CALL
 from dqe_agent.state import AgentState
 
 logger = logging.getLogger(__name__)
-
-# ── Keywords that signal Jira involvement ────────────────────────────────────
-_JIRA_KEYWORDS = {
-    "jira",
-    "ticket",
-    "issue",
-    "sprint",
-    "board",
-    "epic",
-    "story",
-    "backlog",
-    # also trigger for common creation verbs when Jira context is implied
-    "task",
-    "bug",
-    "subtask",
-    "create ticket",
-    "create issue",
-    "create task",
-    "create sprint",
-    "create story",
-    "create epic",
-}
 
 # ── In-memory cache for common data (Jira projects, sprints, etc.) ────────────
 _CACHE: dict[str, tuple[float, Any]] = {}  # key -> (fetch_time, data)
@@ -156,43 +134,13 @@ async def _prewarm_mcp_tool_block() -> None:
 
 
 async def _prefetch_selection_options(task: str, context_parts: list) -> None:
-    """For tasks involving connected systems, pre-fetch valid option lists and inject
-    them into the planner context as ready-made request_selection data.
+    """Pre-fetch Jira project options and inject them into planner context.
 
-    This avoids the LLM having to guess tool names or the user having to type
-    raw IDs. The planner receives the actual options and just wires request_selection.
+    Always runs — projects are cached (10 min TTL) so repeated calls are free.
+    The planner receives the actual project list and can use <<JIRA_PROJECTS_PREFETCHED>>
+    in request_selection steps without guessing IDs.
     """
-    task_lower = task.lower()
-
-    # ── Jira: fetch projects if task is Jira-related ─────────────────────────
-    # Strong keywords → always trigger Jira prefetch
-    _JIRA_STRONG = {
-        "jira",
-        "ticket",
-        "sprint",
-        "board",
-        "epic",
-        "backlog",
-        "create ticket",
-        "create issue",
-        "create sprint",
-        "create story",
-        "create epic",
-        "jira issue",
-    }
-    # Weak keywords → trigger only if a strong keyword is also present
-    _JIRA_WEAK = {"issue", "task", "bug", "subtask", "story"}
-
-    _has_strong = any(kw in task_lower for kw in _JIRA_STRONG)
-    _has_weak = any(kw in task_lower for kw in _JIRA_WEAK)
-    if _has_strong or (_has_weak and _has_strong):
-        await _prefetch_jira_projects(context_parts)
-
-    # NOTE: Boards are NOT pre-fetched globally because jira_get_agile_boards
-    # without a project filter returns workspace-wide boards which may miss the
-    # user's target project boards.  Instead the plan selects a project first,
-    # then fetches boards for that specific project as a plan step.  The
-    # executor's pre-resolution logic converts the step result into options.
+    await _prefetch_jira_projects(context_parts)
 
 
 async def _prefetch_jira_projects(context_parts: list) -> None:
@@ -428,33 +376,6 @@ def _parse_jira_projects(result_raw: Any, result_str: str) -> list[dict]:
     return options[:100]
 
 
-_BROWSER_TASK_KEYWORDS = {
-    "netsuite",
-    "cpq",
-    "quote",
-    "browser",
-    "website",
-    "web",
-    "page",
-    "login",
-    "navigate",
-    "click",
-    "fill",
-    "scroll",
-    "form",
-    "screenshot",
-    "http",
-    "https",
-    "url",
-}
-
-
-def _needs_browser(task: str) -> bool:
-    """Return True if this task likely requires browser tools."""
-    t = task.lower()
-    return any(kw in t for kw in _BROWSER_TASK_KEYWORDS)
-
-
 # ── Master system prompt — all tasks ─────────────────────────────────────────
 MASTER_SYSTEM_PROMPT = """You are a task-execution agent. Given a task you output a COMPLETE plan as a JSON array of steps, then an executor runs each step in order.
 
@@ -472,11 +393,27 @@ CRITICAL OUTPUT RULES:
    Same rule applies to: issue key, sprint name, assignee, priority, status, comment text,
    time duration, issue type, board name. Extract from the message first.
    Only ask / show selection when the value is genuinely absent.
-9. ⚑ NEVER ASSUME A DATE OR TIME RANGE.
-   If the user's task does not explicitly mention a date (e.g. "today", "tomorrow", "this week",
-   "last week", "April 20"), you MUST ask_user for the date/range before proceeding.
-   TODAY'S DATE is provided only as a reference — do NOT auto-fill it into queries unless
-   the user's words explicitly include a relative or absolute date reference.
+9. ⚑ DATE HANDLING RULES:
+   • When the user gives ANY date reference ("today", "this week", "last month", "April 20",
+     "all time", "custom", specific dates) → YOU convert it directly to valid JQL in the plan.
+     TODAY'S DATE is injected in context — use it to resolve relative references.
+   • "all time" / "ever" / "from the beginning" / no date mentioned → omit the date filter entirely.
+   • "custom" / two specific dates given → put the actual date range in the JQL.
+   [Rule] If NO date reference is given → DO NOT add any date/updated/created filter to JQL.
+      "what work did X do?" with no date → JQL has NO date clause. Return all results.
+      NEVER default to startOfDay(), -1d, -7d, or any date when the user did not ask for it.
+
+10. ⚑ PAGINATION RULES:
+   • jira_search and jira_get_sprint_issues return at most 50 results at a time.
+   • Always tell the user how many were shown and whether more exist. End direct_response with:
+     "Showing X of Y results. Say 'show more' or 'next' to see the next page." (omit if no more).
+   • When PAGINATION CONTEXT is present in the context (injected automatically):
+     - "next" / "more" / "show more" / "next 50" / "continue" → repeat the same query with start_at=<next_start_at>
+     - "previous" / "go back" → repeat with start_at=<prev_start_at>
+     - "from beginning" / "restart" → repeat with start_at=0
+   • For sprint issues pagination: jira_get_sprint_issues has no start_at — use jira_search with
+     jql="sprint = <sprint_id>" + start_at for any page after the first.
+   • NEVER re-ask for project/sprint/filter when paginating — reuse values from PAGINATION CONTEXT.
 
 ═══════════════════════════════════════════════════════════════════
 TOOLS
@@ -503,7 +440,7 @@ TOOLS
   Listed in AVAILABLE_MCP_TOOLS injected into the context below.
   Call them directly as a step tool. Param names must exactly match the schema.
   Never add extra params like "ctx", "priority", "auth_check" — only schema params.
-  ⛔ NEVER invent tool names. If a capability is not in AVAILABLE_MCP_TOOLS, use direct_response to explain the limitation instead of fabricating a tool name.
+  [Rule] Do not invent tool names. If a capability is not in AVAILABLE_MCP_TOOLS, use direct_response to explain the limitation instead of fabricating a tool name.
 
 ── BROWSER TOOLS (web automation only — see BROWSER INSTRUCTIONS section if present) ──
   browser_login(site)                   log in to a configured site
@@ -537,7 +474,7 @@ Only when the value is genuinely absent:
 NEVER use ask_user for system-defined values. NEVER hard-code options you haven't fetched.
 NEVER ask the user to type a key, ID, or code that the system can provide as a list.
 
-⛔ NEVER ASSUME any Jira field. This means:
+[Rule] Do not ASSUME any Jira field. This means:
   • Project: if stated in task → look up the real key from JIRA_PROJECTS_PREFETCHED and use it directly.
              if NOT stated → use request_selection with JIRA_PROJECTS_PREFETCHED options.
              NEVER invent a project key from the user's words without matching it to the cache.
@@ -556,7 +493,7 @@ Use MCP tools from AVAILABLE_MCP_TOOLS. Do NOT use browser_* tools for Jira.
 Verifier note: Jira steps are verified by response content only — no screenshot.
 Use plain success_criteria like "Issue created successfully" or "Projects listed".
 
-── CREATE ISSUE — MANDATORY step order (ALWAYS follow this — no exceptions) ──
+── CREATE ISSUE — Required step order (ALWAYS follow this — no exceptions) ──
 
 ⚑ KEY RULE — resolve the REAL project key from JIRA_PROJECTS_PREFETCHED BEFORE fetching
   assignees or creating anything. NEVER use <<FIRST_PROJECT_KEY>>. NEVER guess a key from
@@ -571,44 +508,72 @@ CASE A — project IS stated in the task (e.g. "create issue in FLAG", "create b
   • Use that real key throughout — DO NOT put a project selection field in the form.
   • Replace <REAL_KEY> below with the actual "value" from JIRA_PROJECTS_PREFETCHED.
 
+⚑ SMART FORM RULE — only ask for what is NOT already known from the user's message:
+  • summary:    user gave a clear title/topic → pre-fill as default, required:false (confirm only)
+                user gave NO title at all → required:true, no default
+  • issue_type: user said "bug"/"task"/"story"/"epic" → OMIT this field entirely, hardcode in create_issue
+                user gave no type → include as select, required:true
+  • assignee:   user named a person → OMIT this field, resolve the name from fetch_users and hardcode
+                user gave no assignee → include as select, required:false
+  • priority:   user gave an exact priority → OMIT this field, hardcode in upd_issue
+                user gave no priority → include as select, required:true
+  • desc_topic: always optional — pre-fill with user's description if they gave one, otherwise leave blank
+
+  EXAMPLE — user says "create a task in FLAG for making UI with hero UI, assign to hrithik":
+    Known: project=FLAG, summary≈"Making UI with Hero UI", type=task (implied), assignee≈"hrithik"
+    Form should only show: priority (unknown), desc_topic (optional)
+    Assignee is resolved by matching "hrithik" against fetch_users options (case-insensitive first-name match)
+    Hardcode: issue_type="Task", assignee="Hrithik <FullName>" from fetch_users
+
   EXACT JSON for CASE A (replace every <REAL_KEY> with the matched project value):
-  {"id":"get_pri","tool":"jira_get_priorities","params":{},"success_criteria":"Priorities fetched"},
+  {"id":"get_pri","tool":"jira_get_priorities","params":{"project_key":"<REAL_KEY>"},"success_criteria":"Priorities fetched"},
   {"id":"fetch_users","tool":"jira_get_assignable_users","params":{"project_key":"<REAL_KEY>"},"success_criteria":"Users fetched"},
   {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Task","fields":[
-    {"id":"summary","label":"Task Summary","type":"text","required":true,"placeholder":"Short one-line title"},
+    {"id":"summary","label":"Task Summary","type":"text","required":<true_if_unknown|false_if_known>,"placeholder":"Short one-line title","default":"<known_summary_or_omit>"},
+    <OMIT issue_type field if type is known — use hardcoded value in create_issue>,
     {"id":"issue_type","label":"Issue Type","type":"select","required":true,"options":[{"value":"Task","label":"Task"},{"value":"Bug","label":"Bug"},{"value":"Story","label":"Story"},{"value":"Epic","label":"Epic"}]},
     {"id":"priority","label":"Priority","type":"select","required":true,"options":"{{get_pri}}"},
+    <OMIT assignee field if assignee name was stated — resolve from fetch_users and hardcode>,
     {"id":"assignee","label":"Assignee","type":"select","required":false,"options":"{{fetch_users}}"},
-    {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?"}
+    {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?","default":"<known_description_if_any>"}
   ]},"success_criteria":"All task details collected"},
   {"id":"gen_desc","tool":"llm_draft_content","params":{"content_type":"issue_description","topic":"{{collect_info.desc_topic}}","context":"{{collect_info.issue_type}} in <REAL_KEY>: {{collect_info.summary}}, priority {{collect_info.priority}}"},"success_criteria":"Description drafted"},
   {"id":"edit_desc","tool":"request_edit","params":{"label":"Issue Description","content":"{{gen_desc.content}}"},"success_criteria":"Description reviewed"},
   {"id":"create_issue","tool":"jira_create_issue","params":{"project_key":"<REAL_KEY>","issue_type":"{{collect_info.issue_type}}","summary":"{{collect_info.summary}}","description":"{{edit_desc.content}}"},"success_criteria":"Issue created"},
-  {"id":"upd_issue","tool":"jira_update_issue","params":{"issue_key":"{{create_issue.key}}","fields":{"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"}}}
+  {"id":"upd_issue","tool":"jira_update_issue","params":{"issue_key":"{{create_issue.key}}","fields":{"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"}},"success_criteria":"Priority and assignee set"},
+  {"id":"get_created","tool":"jira_get_issue","params":{"issue_key":"{{create_issue.key}}"},"success_criteria":"Issue details fetched"},
+  {"id":"done","tool":"direct_response","params":{"message":"Issue created successfully!\n\nKey: {{create_issue.key}}\nSummary: {{collect_info.summary}}\nType: {{collect_info.issue_type}}\nPriority: {{collect_info.priority}}\nAssignee: {{collect_info.assignee}}\n\nFull details:\n{{get_created}}"}}
 
 CASE B — project NOT stated in the task:
   First show project selection, then fetch assignees for the CHOSEN project.
+  Apply the same SMART FORM RULE — only include fields not already known.
 
   EXACT JSON for CASE B:
   {"id":"sel_proj","tool":"request_selection","params":{"question":"Which Jira project should this be created in?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
-  {"id":"get_pri","tool":"jira_get_priorities","params":{},"success_criteria":"Priorities fetched"},
+  {"id":"get_pri","tool":"jira_get_priorities","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Priorities fetched"},
   {"id":"fetch_users","tool":"jira_get_assignable_users","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Users fetched"},
   {"id":"collect_info","tool":"request_form","params":{"title":"Create Jira Task","fields":[
-    {"id":"summary","label":"Task Summary","type":"text","required":true,"placeholder":"Short one-line title"},
+    {"id":"summary","label":"Task Summary","type":"text","required":<true_if_unknown|false_if_known>,"placeholder":"Short one-line title","default":"<known_summary_or_omit>"},
+    <OMIT issue_type field if type is known>,
     {"id":"issue_type","label":"Issue Type","type":"select","required":true,"options":[{"value":"Task","label":"Task"},{"value":"Bug","label":"Bug"},{"value":"Story","label":"Story"},{"value":"Epic","label":"Epic"}]},
     {"id":"priority","label":"Priority","type":"select","required":true,"options":"{{get_pri}}"},
+    <OMIT assignee field if assignee name was stated — resolve from fetch_users>,
     {"id":"assignee","label":"Assignee","type":"select","required":false,"options":"{{fetch_users}}"},
     {"id":"desc_topic","label":"Description Topic","type":"textarea","required":false,"placeholder":"What should the description cover?"}
   ]},"success_criteria":"All task details collected"},
   {"id":"gen_desc","tool":"llm_draft_content","params":{"content_type":"issue_description","topic":"{{collect_info.desc_topic}}","context":"{{collect_info.issue_type}} in {{sel_proj.selected}}: {{collect_info.summary}}, priority {{collect_info.priority}}"},"success_criteria":"Description drafted"},
   {"id":"edit_desc","tool":"request_edit","params":{"label":"Issue Description","content":"{{gen_desc.content}}"},"success_criteria":"Description reviewed"},
   {"id":"create_issue","tool":"jira_create_issue","params":{"project_key":"{{sel_proj.selected}}","issue_type":"{{collect_info.issue_type}}","summary":"{{collect_info.summary}}","description":"{{edit_desc.content}}"},"success_criteria":"Issue created"},
-  {"id":"upd_issue","tool":"jira_update_issue","params":{"issue_key":"{{create_issue.key}}","fields":{"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"}}}
+  {"id":"upd_issue","tool":"jira_update_issue","params":{"issue_key":"{{create_issue.key}}","fields":{"priority":"{{collect_info.priority}}","assignee":"{{collect_info.assignee}}"}},"success_criteria":"Priority and assignee set"},
+  {"id":"get_created","tool":"jira_get_issue","params":{"issue_key":"{{create_issue.key}}"},"success_criteria":"Issue details fetched"},
+  {"id":"done","tool":"direct_response","params":{"message":"Issue created successfully!\n\nKey: {{create_issue.key}}\nSummary: {{collect_info.summary}}\nType: {{collect_info.issue_type}}\nPriority: {{collect_info.priority}}\nAssignee: {{collect_info.assignee}}\n\nFull details:\n{{get_created}}"}}
 
 ⚑ EVERY field dict MUST include an "id" key.
-⚑ summary is ALWAYS required. "about X" or a topic phrase is NOT a summary — always ask.
-⚑ priority is ALWAYS required unless user stated an exact priority name.
-⚑ assignee MUST be a select field using {{fetch_users}} — NEVER a text field.
+⚑ summary: pre-fill as default when user gave a clear title; only require when truly absent.
+⚑ priority is required ONLY when user did not state an exact priority name.
+⚑ assignee: when user names a person, match against fetch_users (case-insensitive, first name ok) and hardcode — do NOT show assignee field.
+⚑ issue_type: when user states type ("bug", "task", "story", "epic") → omit field, hardcode in create_issue.
+⚑ NEVER show a field for something the user already told you.
 
 project_key rules:
   • MUST be a short ALL-UPPERCASE key like FLAG, DEV, PROJ.
@@ -626,7 +591,7 @@ issue_type rules:
   The executor pre-resolves the board list into request_selection options automatically.
   start_date / end_date are auto-filled by executor — NEVER ask the user for them.
 
-  ⛔ STEP ORDER IS STRICT — a step that references {{X.selected}} MUST come AFTER the step with id "X".
+  [Rule] STEP ORDER IS STRICT — a step that references {{X.selected}} MUST come AFTER the step with id "X".
      NEVER place jira_get_agile_boards before the project selection step it depends on.
 
   CASE A — project key IS in the task (e.g. "Create a sprint in FLAG"):
@@ -660,36 +625,57 @@ issue_type rules:
      NEVER skip the form or leave date fields empty — the executor no longer auto-fills them.
 
 ── GET ACTIVE SPRINTS ──
-To retrieve active sprints (e.g. "what is the active sprint for me?"):
-  1. Get boards — jira_get_agile_boards (optionally filter by project_key if known).
-  2. If more than one board, use request_selection so the user picks the relevant board.
-  3. Call jira_get_sprints_from_board with board_id from step 2 and state="active".
-     This returns a list of active sprints.
-  4. If you need issues in the active sprint for the current user, use jira_search:
-       jql="sprint = <sprint_id> AND assignee = currentUser()"
-     Or call jira_get_sprint_issues(sprint_id="<sprint_id>") after selecting a sprint.
+To retrieve active sprints (e.g. "what is the active sprint for me?", "status of current sprint"):
+  ⚑ ALWAYS select project first — boards are project-specific. NEVER call jira_get_agile_boards with no project_key.
+  1. If project is NOT stated → request_selection from <<JIRA_PROJECTS_PREFETCHED>> first.
+  2. Fetch boards for that project → jira_get_agile_boards(project_key=<key>).
+  3. request_selection so user picks the board (executor auto-skips if only one board).
+  4. Call jira_get_sprints_from_board(board_id=..., state="active") → returns sprint list.
+  5. request_selection so user picks which sprint (executor auto-skips if only one active sprint).
+  6. direct_response with the sprint result OR call jira_get_sprint_issues(sprint_id="{{sel_sprint.selected}}").
 
-  Example — "show active sprints":
+  ⚑ sprint_id must ALWAYS be a plain string ID like "1454" — NEVER pass the full sprint object or list.
+     Use request_selection after jira_get_sprints_from_board so the user picks one sprint,
+     then reference {{sel_sprint.selected}} as the sprint_id string.
+
+  Example — show sprint issues, project NOT stated ("show current sprint board", "what tasks are in current sprint"):
   [
-    {"id":"boards","tool":"jira_get_agile_boards","params":{},"success_criteria":"Boards retrieved"},
+    {"id":"sel_proj","tool":"request_selection","params":{"question":"Which project's sprint do you want to check?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
+    {"id":"boards","tool":"jira_get_agile_boards","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Boards retrieved"},
+    {"id":"sel_board","tool":"request_selection","params":{"question":"Which board?","options":"{{boards}}","multi_select":false},"success_criteria":"Board selected"},
+    {"id":"active","tool":"jira_get_sprints_from_board","params":{"board_id":"{{sel_board.selected}}","state":"active"},"success_criteria":"Active sprints loaded"},
+    {"id":"sel_sprint","tool":"request_selection","params":{"question":"Which active sprint?","options":"{{active}}","multi_select":false},"success_criteria":"Sprint selected"},
+    {"id":"issues","tool":"jira_get_sprint_issues","params":{"sprint_id":"{{sel_sprint.selected}}","limit":50},"success_criteria":"Sprint issues fetched"},
+    {"id":"show","tool":"direct_response","params":{"message":"Sprint issues:\n{{issues}}"}}
+  ]
+
+  Example — just show sprint info (no issues needed), project IS stated ("current sprint in FLAG"):
+  [
+    {"id":"boards","tool":"jira_get_agile_boards","params":{"project_key":"FLAG"},"success_criteria":"Boards retrieved"},
     {"id":"sel_board","tool":"request_selection","params":{"question":"Which board?","options":"{{boards}}","multi_select":false},"success_criteria":"Board selected"},
     {"id":"active","tool":"jira_get_sprints_from_board","params":{"board_id":"{{sel_board.selected}}","state":"active"},"success_criteria":"Active sprints loaded"},
     {"id":"show","tool":"direct_response","params":{"message":"Active sprints:\n{{active}}"}}
   ]
 
-  ⛔ direct_response for sprints MUST use EXACTLY: "message":"Active sprints:\n{{active}}"
-     Do NOT add sections like "Available Priorities", "Board Info", or any other headers.
-     The sprint tool result already contains all the detail needed — embed it as-is.
-
+  [Rule] Do not call jira_get_agile_boards with empty params {} — always pass project_key.
+  [Rule] jira_get_sprint_issues limit MUST be ≤ 50 — never pass limit > 50.
+  [Rule] Do not pass {{active}} directly as sprint_id — {{active}} is a list of sprint objects, NOT a string ID.
+     Always add a request_selection step after jira_get_sprints_from_board to get a single sprint_id string.
   ⛠ There is NO tool named 'jira_get_active_sprints' — use jira_get_sprints_from_board with state='active'.
 
 
 
-⛔ NEVER pass jira_get_transitions result directly as transition_id (it's a list, not a string).
+[Rule] Do not pass jira_get_transitions result directly as transition_id (it's a list, not a string).
 
   Required params for jira_transition_issue:
-    issue_key     (string, e.g. "FLAG-42")
-    transition_id (string — a SINGLE numeric ID like "31", NOT a list)
+    issue_key      (string, e.g. "FLAG-42")
+    transition_id  (string — a SINGLE numeric ID like "31", NOT a list)
+    _target_status (string — ALWAYS include the target status name from the user's request,
+                   e.g. "in progress", "done", "to do", "testing". The executor uses this
+                   to pick the correct transition from the fetched list.)
+
+  ⚑ ALWAYS include _target_status in jira_transition_issue params when the target is stated by the user.
+  ⚑ _target_status must be a plain lowercase string: "in progress", "done", "to do", "testing", "on hold".
 
   DECISION TREE — follow this exactly:
 
@@ -697,12 +683,12 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
      → request_selection(multi_select=true) to let user pick which issues to act on FIRST.
      Then loop the transition steps for each selected issue.
 
-  B) TARGET STATUS already known from user message ("mark as Done", "close", "complete")
-     → jira_get_transitions(issue_key=...) → jira_transition_issue(transition_id="{{get_tr}}")
-     The executor auto-extracts the matching ID by name. SKIP request_selection for status.
+  B) TARGET STATUS already known from user message ("move to In Progress", "mark as Done", "close")
+     → jira_get_transitions(issue_key=...) → jira_transition_issue(transition_id="{{get_tr}}", _target_status="<status>")
+     The executor uses _target_status to match the correct ID. SKIP request_selection for status.
 
   C) TARGET STATUS is ambiguous (user just said "update status" / "change state")
-     → jira_get_transitions → request_selection for status → jira_transition_issue
+     → jira_get_transitions → request_selection for status → jira_transition_issue(transition_id="{{sel_tr.selected}}")
 
   EXAMPLE A — "mark them as done" (multiple open tasks returned from previous step):
   [
@@ -711,23 +697,36 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
                "options":"{{search_tasks}}","multi_select":true},
      "success_criteria":"Issues selected"},
     {"id":"get_tr_1","tool":"jira_get_transitions","params":{"issue_key":"FLAG-33"},"success_criteria":"Transitions fetched"},
-    {"id":"tr_1","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{get_tr_1}}"},"success_criteria":"FLAG-33 marked Done"},
+    {"id":"tr_1","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{get_tr_1}}","_target_status":"done"},"success_criteria":"FLAG-33 marked Done"},
     {"id":"get_tr_2","tool":"jira_get_transitions","params":{"issue_key":"FLAG-32"},"success_criteria":"Transitions fetched"},
-    {"id":"tr_2","tool":"jira_transition_issue","params":{"issue_key":"FLAG-32","transition_id":"{{get_tr_2}}"},"success_criteria":"FLAG-32 marked Done"}
+    {"id":"tr_2","tool":"jira_transition_issue","params":{"issue_key":"FLAG-32","transition_id":"{{get_tr_2}}","_target_status":"done"},"success_criteria":"FLAG-32 marked Done"}
   ]
-  Note: passing {{get_tr_N}} directly — the executor finds and extracts the "Done" ID automatically.
+
+  ⚑ ALWAYS add jira_get_issue AFTER jira_transition_issue + direct_response showing the actual current status. This confirms the transition actually happened.
 
   EXAMPLE B — "mark FLAG-33 as Done" (single issue, status known):
   [
     {"id":"get_tr","tool":"jira_get_transitions","params":{"issue_key":"FLAG-33"},"success_criteria":"Transitions listed"},
-    {"id":"do_tr","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{get_tr}}"},"success_criteria":"Done"}
+    {"id":"do_tr","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{get_tr}}","_target_status":"done"},"success_criteria":"Transitioned to Done"},
+    {"id":"verify","tool":"jira_get_issue","params":{"issue_key":"FLAG-33"},"success_criteria":"Issue fetched"},
+    {"id":"done","tool":"direct_response","params":{"message":"FLAG-33 has been moved to Done.\n\nCurrent issue details:\n{{verify}}"}}
+  ]
+
+  EXAMPLE B2 — "move FLAG-145 to In Progress" (single issue, status known):
+  [
+    {"id":"get_tr","tool":"jira_get_transitions","params":{"issue_key":"FLAG-145"},"success_criteria":"Transitions listed"},
+    {"id":"do_tr","tool":"jira_transition_issue","params":{"issue_key":"FLAG-145","transition_id":"{{get_tr}}","_target_status":"in progress"},"success_criteria":"Transitioned to In Progress"},
+    {"id":"verify","tool":"jira_get_issue","params":{"issue_key":"FLAG-145"},"success_criteria":"Issue fetched"},
+    {"id":"done","tool":"direct_response","params":{"message":"FLAG-145 has been moved to In Progress.\n\nCurrent issue details:\n{{verify}}"}}
   ]
 
   EXAMPLE C — "change the status of FLAG-33" (ambiguous — ask):
   [
     {"id":"get_tr","tool":"jira_get_transitions","params":{"issue_key":"FLAG-33"},"success_criteria":"Transitions listed"},
-    {"id":"sel_tr","tool":"request_selection","params":{"question":"Which status?","options":"{{get_tr}}","multi_select":false},"success_criteria":"Status selected"},
-    {"id":"do_tr","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{sel_tr.selected}}"},"success_criteria":"Done"}
+    {"id":"sel_tr","tool":"request_selection","params":{"question":"Which status would you like to move FLAG-33 to?","options":"{{get_tr}}","multi_select":false},"success_criteria":"Status selected"},
+    {"id":"do_tr","tool":"jira_transition_issue","params":{"issue_key":"FLAG-33","transition_id":"{{sel_tr.selected}}"},"success_criteria":"Transitioned"},
+    {"id":"verify","tool":"jira_get_issue","params":{"issue_key":"FLAG-33"},"success_criteria":"Issue fetched"},
+    {"id":"done","tool":"direct_response","params":{"message":"FLAG-33 status updated.\n\nCurrent issue details:\n{{verify}}"}}
   ]
 
 ── DIRECT-ANSWER QUERIES (count / filter / list) ──
@@ -745,31 +744,76 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
     Combine freely:         assignee = currentUser() AND status = "In Progress"
     Worklog on a date:      worklogDate = "YYYY-MM-DD" AND worklogAuthor = currentUser()
 
-  ⚑ DATE RULE FOR JQL: NEVER auto-fill a date in worklogDate, created, updated, or any other
-    date field unless the user explicitly stated a date in the task.
-    If no date is given → ask_user("Which date should I check? (e.g. today, April 20, last week)")
+  ⚑ DATE RULE FOR JQL: Convert any date reference the user gives you directly to JQL in the plan.
+    "all time" → omit date clause. "custom" → collect via form. "today"/"this week"/etc. → JQL function.
+    If NO date was mentioned at all → ask_user or show a period-select form before querying.
 
   Count query ("how many X do I have?"):
   [{"id":"s","tool":"jira_search","params":{"jql":"assignee = currentUser() AND status != Done","limit":1},"success_criteria":"Count returned"},
    {"id":"r","tool":"direct_response","params":{"message":"You have {{s.total}} open issues."}}]
 
   List query ("show all critical issues"):
-  [{"id":"s","tool":"jira_search","params":{"jql":"priority = Critical AND status != Done","limit":100},"success_criteria":"Issues listed"},
+  [{"id":"s","tool":"jira_search","params":{"jql":"priority = Critical AND status != Done","limit":50},"success_criteria":"Issues listed"},
    {"id":"r","tool":"direct_response","params":{"message":"Critical open issues:\n{{s}}"}}]
 
-  Assignee workload ("what is Tom working on?" / "show Hrithik's tasks" / "check tasks of Alice"):
-  RULE: NEVER use assignee = "display name" directly — Jira Cloud requires an account ID.
-        ALWAYS call jira_search_users first to resolve the name to an account ID, then use it in JQL.
+  ⚑ Important distinction — "tasks done" vs "tasks assigned":
+    "what tasks did X do?" / "tasks done by X" / "tasks performed by X" / "tasks completed by X"
+    / "what did X work on?" / "what has X done?" / "history of X's work" / "what tasks did X have?"
+    → THESE ARE ISSUE SEARCH QUERIES (jira_search with status = Done), NOT worklog queries!
+    → Use: jql="assignee = \"<Name>\" AND status = Done ORDER BY updated DESC"
+    → DO NOT use jira_get_worklogs_by_date_range for "tasks done/completed/performed/have" queries.
 
-  [{"id":"find","tool":"jira_search_users","params":{"query":"Tom"},"success_criteria":"User account found"},
-   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{find.accountId}}\" AND status != Done ORDER BY updated DESC","limit":100},"success_criteria":"Issues listed"},
-   {"id":"r","tool":"direct_response","params":{"message":"Tom's open issues:\n{{s}}"}}]
+    "hours logged by X" / "worklogs for X" / "how many hours did X log?" / "time logged by X"
+    → THESE ARE WORKLOG QUERIES → use jira_get_worklogs_by_date_range.
 
-  If jira_search_users returns multiple users → add request_selection step before jira_search:
-  [{"id":"find","tool":"jira_search_users","params":{"query":"Hrithik"}},
-   {"id":"pick","tool":"request_selection","params":{"question":"Which Hrithik?","options":"{{find}}"}},
-   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND status != Done","limit":100}},
+  ⚑ NAME DISAMBIGUATION RULE — Required:
+    A name is AMBIGUOUS when it is a SINGLE WORD (e.g. "tania", "john", "saddam").
+    A full display name is TWO+ words (e.g. "Tania Smith", "John Doe", "Saddam Jameel").
+    SINGLE-WORD NAME → ALWAYS fetch jira_get_assignable_users first + request_selection BEFORE searching.
+    TWO+ WORD NAME → NEVER add project-selection or member-fetch steps. Put the name directly in JQL.
+    [Rule] Do not put a raw single first name directly into a JQL assignee clause — assignee = "Saddam" is WRONG.
+    [Rule] Do not add sel_proj / jira_get_assignable_users / pick steps when a full name (2+ words) is given.
+    [Rule] This rule applies to ALL query types: open tasks, completed tasks, worklogs — no exceptions.
+
+    "tasks of saddam" (single word) → Required 5-step plan:
+    [{"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false}},
+     {"id":"members","tool":"jira_get_assignable_users","params":{"project_key":"{{sel_proj.selected}}"}},
+     {"id":"pick","tool":"request_selection","params":{"question":"Which Saddam do you mean?","options":"{{members}}","multi_select":false}},
+     {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND project = {{sel_proj.selected}} ORDER BY updated DESC","limit":50}},
+     {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s tasks:\n{{s}}"}}]
+    [Rule] ALWAYS include AND project = {{sel_proj.selected}} in the JQL when a project was selected.
+
+  Assignee workload — OPEN tasks ("what is Tom working on?" / "show Hrithik's tasks" / "open tasks of saddam jameel"):
+  [Rule] Full name (TWO+ words) known → NEVER add project-selection or member-fetch steps. Use JQL directly.
+  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = \"Tom Smith\" AND status != Done ORDER BY updated DESC","limit":50},"success_criteria":"Issues listed"},
+   {"id":"r","tool":"direct_response","params":{"message":"Tom Smith's open issues:\n{{s}}"}}]
+
+  Single/partial name ("tania", "john") → Required disambiguation first:
+  [{"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
+   {"id":"members","tool":"jira_get_assignable_users","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Members fetched"},
+   {"id":"pick","tool":"request_selection","params":{"question":"Which Tania do you mean?","options":"{{members}}","multi_select":false},"success_criteria":"Person selected"},
+   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND project = {{sel_proj.selected}} AND status != Done ORDER BY updated DESC","limit":50},"success_criteria":"Issues listed"},
    {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s open issues:\n{{s}}"}}]
+
+  Assignee COMPLETED tasks ("tasks done by tania" / "what did tania perform?" / "what tasks did tania have?"):
+  Single/partial name → Required disambiguation:
+  [{"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
+   {"id":"members","tool":"jira_get_assignable_users","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Members fetched"},
+   {"id":"pick","tool":"request_selection","params":{"question":"Which Tania do you mean?","options":"{{members}}","multi_select":false},"success_criteria":"Person selected"},
+   {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND project = {{sel_proj.selected}} AND status = Done ORDER BY updated DESC","limit":50},"success_criteria":"Completed issues listed"},
+   {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s completed tasks:\n{{s}}"}}]
+
+  Full name completed tasks ("tasks done by saddam jameel"):
+  [Rule] Full name → NO project-selection steps. Use JQL directly.
+  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = \"Saddam Jameel\" AND status = Done ORDER BY updated DESC","limit":50},"success_criteria":"Completed issues listed"},
+   {"id":"r","tool":"direct_response","params":{"message":"Saddam Jameel's completed tasks:\n{{s}}"}}]
+
+  ⚑ Project filter: if a project is mentioned, use project members instead of global selection.
+    "tasks done by tania in acumen" → use jira_get_assignable_users(project_key="<ACUMEN_KEY>") then add "AND project = <ACUMEN_KEY>" to JQL.
+
+  ALL tasks (open + done) for a person ("all tasks of X" / "everything assigned to X"):
+  [{"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" ORDER BY updated DESC","limit":50},"success_criteria":"All issues listed"},
+   {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s tasks:\n{{s}}"}}]
 
   Sprint days remaining ("how many days left in sprint?"):
   [{"id":"sp","tool":"jira_get_active_sprints","params":{},"success_criteria":"Sprint info returned"},
@@ -829,34 +873,125 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
    {"id":"done","tool":"direct_response","params":{"message":"Logged {{collect.time_spent}} on FLAG-42."}}]
 
 ── CHECK WORKLOGS / LOGGED HOURS (read-only queries) ──
-  "Do we have logged hours?", "show worklogs", "who logged time?" → use jira_search with worklogDate JQL.
-  ⚑ ALWAYS ask for the date/range first — NEVER assume today or any date.
+  "show worklogs", "who logged time?", "how many hours logged?", "log hours per member"
 
-  JQL date functions for worklogDate (use these — plain English is NOT valid Jira JQL):
-    Today:          worklogDate = now()
-    Yesterday:      worklogDate = -1d
-    This week:      worklogDate >= startOfWeek()
-    Last week:      worklogDate >= startOfWeek(-1) AND worklogDate <= endOfWeek(-1)
-    This month:     worklogDate >= startOfMonth()
-    Last month:     worklogDate >= startOfMonth(-1) AND worklogDate <= endOfMonth(-1)
-    Specific date:  worklogDate = "2026-04-20"
-    Date range:     worklogDate >= "2026-04-01" AND worklogDate <= "2026-04-30"
+  ⚑ KEY RULE: Use jira_get_worklogs_by_date_range for ALL worklog/hours queries.
+    DO NOT use jira_search — it returns issue lists, NOT actual hour data.
+    jira_get_worklogs_by_date_range returns real hours per user, per issue, aggregated and formatted.
 
-  ⚑ When the user answers with natural language ("last month", "this week", "yesterday"),
-    YOU must convert it to the correct JQL expression from the table above.
-    NEVER pass the user's raw words into the jql string.
+  ════ STEP 0 — UNDERSTAND INTENT BEFORE PLANNING ════
+  Classify three dimensions FIRST. Do NOT generate steps until you know each dimension.
 
-  MANDATORY plan for worklog queries when date is NOT given:
-  [{"id":"ask_date","tool":"ask_user","params":{"question":"Which period should I check logged hours for? (e.g. today, yesterday, this week, last month, or a specific date like April 20)"}},
-   {"id":"s","tool":"jira_search","params":{"jql":"worklogDate >= startOfMonth(-1) AND worklogDate <= endOfMonth(-1) AND worklogAuthor = currentUser()","limit":25},"success_criteria":"Worklogs found"},
-   {"id":"r","tool":"direct_response","params":{"message":"Logged hours:\n{{s}}"}}]
+  DIMENSION 1 — WHO (member filter):
+    "each member" / "all members" / "everyone" / "per member" / "team members" / "the team"
+                                      → member_name = "" (all — pass empty string or omit) → CASE A
+    "my hours" / "I logged" / "me"   → member_name = "__me__" → CASE C
+    specific full name ("John Smith's hours") → member_name = full name → CASE B
+    partial/ambiguous name ("tania", "john") → ALWAYS fetch members → request_selection to disambiguate → CASE B after selection
+    NO name mentioned at all ("log hours", "show worklogs", "logged hours for team members")
+                                      → WHO is unknown → fetch members → show selection → CASE D/E
 
-  NOTE: Replace the hardcoded JQL in the template with the correct expression matching {{ask_date.answer}}.
-  Example: if user says "last month" → use "worklogDate >= startOfMonth(-1) AND worklogDate <= endOfMonth(-1)"
-           if user says "today"      → use "worklogDate = now()"
-           if user says "April 20"   → use "worklogDate = \"2026-04-20\""
+  ⚑ "team members" alone does NOT mean all members — it means the user wants to pick from the team.
+     Only treat as CASE A when user says "all", "everyone", "each member", "per member", or "all team members".
 
-  If date IS in the task (e.g. "show worklogs for April 20") → skip ask_date, use JQL directly.
+  DIMENSION 2 — WHEN (date range, convert using TODAY'S DATE):
+    "today"              → start_date = end_date = today's date (YYYY-MM-DD)
+    "this week"          → start_date = Monday of this week, end_date = today
+    "last week"          → start_date = last Monday, end_date = last Sunday
+    "this month"         → start_date = first of this month, end_date = today
+    "last month"         → start_date = first of last month, end_date = last day of last month
+    "last 7 days"        → start_date = 7 days ago, end_date = today
+    "last 30 days"       → start_date = 30 days ago, end_date = today
+    specific date range  → convert directly to YYYY-MM-DD
+    "all time" / "ever"  → start_date = "2000-01-01", end_date = today (broadest range)
+    not mentioned        → show date options for user to pick (request_selection)
+
+  DIMENSION 3 — WHERE (project):
+    Named in task        → use directly
+    Not named            → request_selection from <<JIRA_PROJECTS_PREFETCHED>>
+
+  [Rule] Do not show a member selection form when user already specified who (including "each member").
+
+  ════ DECISION TREE ════
+
+  CASE A — "each member" / "all members" / "everyone" / "per member" (WHO = all):
+    ⚑ NO member selection. member_name = "" (empty). Collect only project + date range.
+
+    Sub-case A1 — project AND date both known in task:
+    [{"id":"wl","tool":"jira_get_worklogs_by_date_range","params":{"project_key":"FLAG","start_date":"2026-04-01","end_date":"2026-04-30","member_name":""},"success_criteria":"Worklogs fetched"},
+     {"id":"r","tool":"direct_response","params":{"message":"Logged hours for all members in FLAG (April 2026):\n{{wl}}"}}]
+
+    Sub-case A2 — project known, date unknown → ask for date range only:
+    [{"id":"collect","tool":"request_form","params":{"title":"Date Range","fields":[
+        {"id":"start_date","label":"Start Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+        {"id":"end_date","label":"End Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"}
+      ]},"success_criteria":"Dates collected"},
+     {"id":"wl","tool":"jira_get_worklogs_by_date_range","params":{"project_key":"FLAG","start_date":"{{collect.start_date}}","end_date":"{{collect.end_date}}","member_name":""},"success_criteria":"Worklogs fetched"},
+     {"id":"r","tool":"direct_response","params":{"message":"Logged hours for all members in FLAG:\n{{wl}}"}}]
+
+    Sub-case A3 — project unknown → select project, then ask for date range:
+    [{"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
+     {"id":"collect","tool":"request_form","params":{"title":"Date Range","fields":[
+        {"id":"start_date","label":"Start Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+        {"id":"end_date","label":"End Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"}
+      ]},"success_criteria":"Dates collected"},
+     {"id":"wl","tool":"jira_get_worklogs_by_date_range","params":{"project_key":"{{sel_proj.selected}}","start_date":"{{collect.start_date}}","end_date":"{{collect.end_date}}","member_name":""},"success_criteria":"Worklogs fetched"},
+     {"id":"r","tool":"direct_response","params":{"message":"Logged hours for all members in {{sel_proj.selected}}:\n{{wl}}"}}]
+
+  CASE B — specific member named in task ("John's hours", "for Sarah this month"):
+    Sub-case B1 — member AND date known in task:
+    [{"id":"wl","tool":"jira_get_worklogs_by_date_range","params":{"project_key":"FLAG","start_date":"2026-04-01","end_date":"2026-04-30","member_name":"John"},"success_criteria":"Worklogs fetched"},
+     {"id":"r","tool":"direct_response","params":{"message":"John's logged hours in FLAG (April 2026):\n{{wl}}"}}]
+
+    Sub-case B2 — member named but date UNKNOWN → ask for date range before calling tool:
+    [{"id":"collect","tool":"request_form","params":{"title":"Date Range","fields":[
+        {"id":"start_date","label":"Start Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+        {"id":"end_date","label":"End Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"}
+      ]},"success_criteria":"Dates collected"},
+     {"id":"wl","tool":"jira_get_worklogs_by_date_range","params":{"project_key":"FLAG","start_date":"{{collect.start_date}}","end_date":"{{collect.end_date}}","member_name":"John"},"success_criteria":"Worklogs fetched"},
+     {"id":"r","tool":"direct_response","params":{"message":"John's logged hours in FLAG ({{collect.start_date}} → {{collect.end_date}}):\n{{wl}}"}}]
+
+  CASE C — current user ("my hours", "I logged"):
+    Use member_name = "__me__" — executor resolves to currentUser's display name.
+    [{"id":"wl","tool":"jira_get_worklogs_by_date_range","params":{"project_key":"FLAG","start_date":"2026-04-01","end_date":"2026-04-30","member_name":"__me__"},"success_criteria":"Worklogs fetched"},
+     {"id":"r","tool":"direct_response","params":{"message":"Your logged hours in FLAG (April 2026):\n{{wl}}"}}]
+
+  CASE D — WHO unknown (no name given, or "team members" without "all"/"everyone"):
+    Project known, date unknown example:
+    [{"id":"fetch_members","tool":"jira_get_assignable_users","params":{"project_key":"FLAG"},"success_criteria":"Members fetched"},
+     {"id":"sel_member","tool":"request_selection","params":{"question":"Which team member's hours do you want to see?","options":"{{fetch_members}}","multi_select":false},"success_criteria":"Member selected"},
+     {"id":"collect","tool":"request_form","params":{"title":"Date Range","fields":[
+        {"id":"start_date","label":"Start Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+        {"id":"end_date","label":"End Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"}
+      ]},"success_criteria":"Dates collected"},
+     {"id":"wl","tool":"jira_get_worklogs_by_date_range","params":{"project_key":"FLAG","start_date":"{{collect.start_date}}","end_date":"{{collect.end_date}}","member_name":"{{sel_member.selected}}"},"success_criteria":"Worklogs fetched"},
+     {"id":"r","tool":"direct_response","params":{"message":"{{sel_member.selected}}'s logged hours in FLAG:\n{{wl}}"}}]
+
+  CASE E — WHO, WHEN, WHERE all unknown (bare "show worklogs" / "log hours" with no context):
+    [{"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
+     {"id":"fetch_members","tool":"jira_get_assignable_users","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Members fetched"},
+     {"id":"sel_member","tool":"request_selection","params":{"question":"Which team member's hours do you want to see?","options":"{{fetch_members}}","multi_select":false},"success_criteria":"Member selected"},
+     {"id":"collect","tool":"request_form","params":{"title":"Date Range","fields":[
+        {"id":"start_date","label":"Start Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+        {"id":"end_date","label":"End Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"}
+      ]},"success_criteria":"Dates collected"},
+     {"id":"wl","tool":"jira_get_worklogs_by_date_range","params":{"project_key":"{{sel_proj.selected}}","start_date":"{{collect.start_date}}","end_date":"{{collect.end_date}}","member_name":"{{sel_member.selected}}"},"success_criteria":"Worklogs fetched"},
+     {"id":"r","tool":"direct_response","params":{"message":"{{sel_member.selected}}'s logged hours in {{sel_proj.selected}}:\n{{wl}}"}}]
+
+  CASE F — ambiguous partial name given ("tania", "john", any first name only):
+    ALWAYS fetch members and show selection — NEVER guess the full name.
+    Project known example ("log hours for tania in FLAG"):
+    [{"id":"fetch_members","tool":"jira_get_assignable_users","params":{"project_key":"FLAG"},"success_criteria":"Members fetched"},
+     {"id":"sel_member","tool":"request_selection","params":{"question":"Which Tania do you mean?","options":"{{fetch_members}}","multi_select":false},"success_criteria":"Member selected"},
+     {"id":"collect","tool":"request_form","params":{"title":"Date Range","fields":[
+        {"id":"start_date","label":"Start Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"},
+        {"id":"end_date","label":"End Date","type":"text","required":true,"placeholder":"YYYY-MM-DD"}
+      ]},"success_criteria":"Dates collected"},
+     {"id":"wl","tool":"jira_get_worklogs_by_date_range","params":{"project_key":"FLAG","start_date":"{{collect.start_date}}","end_date":"{{collect.end_date}}","member_name":"{{sel_member.selected}}"},"success_criteria":"Worklogs fetched"},
+     {"id":"r","tool":"direct_response","params":{"message":"{{sel_member.selected}}'s logged hours in FLAG:\n{{wl}}"}}]
+    ⚑ A name is ambiguous when it is a single word / first name only. Always disambiguate via selection.
+
+  ⚑ Sprint filter: add only when user mentions a sprint — fetch boards → sprints → select → filter issues separately.
 
 ── LINK ISSUES (jira_create_issue_link) ──
   Tool: jira_create_issue_link
@@ -876,22 +1011,26 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
 
 ── ASSIGN ISSUE (jira_assign_issue) ──
   Tool: jira_assign_issue
-  Params: issue_key* (string), account_id* (string — Jira accountId, NOT a display name)
+  Params: issue_key* (string), account_id* (string — display name or "me"; MCP resolves to accountId internally)
 
-  NEVER pass a display name as account_id. Always resolve first.
+  [Rule] jira_search_users does NOT exist. NEVER use it.
+  Pass display names directly as account_id — the MCP layer resolves them via _get_account_id().
 
-  "Assign to <name>":
-    1. jira_search_users(query="<name>") → get accountId
-    2. jira_assign_issue(issue_key=..., account_id="{{find_user.accountId}}")
+  "Assign to <name>" (name clear from context):
+    jira_assign_issue(issue_key=..., account_id="<display name>")
+
+  "Assign to <name>" (name ambiguous — need to pick from list):
+    1. jira_get_assignable_users(project_key=...) → list of users
+    2. request_selection → user picks
+    3. jira_assign_issue(issue_key=..., account_id="{{sel.selected}}")
 
   "Assign to me" / "Take it":
     jira_assign_issue(issue_key=..., account_id="me")
     (executor auto-substitutes "me" with the configured jira_username)
 
   Example "Assign FLAG-42 to Rachel":
-  [{"id":"find","tool":"jira_search_users","params":{"query":"Rachel"},"success_criteria":"User found"},
-   {"id":"asgn","tool":"jira_assign_issue","params":{"issue_key":"FLAG-42","account_id":"{{find.accountId}}"},"success_criteria":"Assigned"},
-   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 assigned to Rachel ({{find.displayName}})."}}]
+  [{"id":"asgn","tool":"jira_assign_issue","params":{"issue_key":"FLAG-42","account_id":"Rachel"},"success_criteria":"Assigned"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 assigned to Rachel."}}]
 
   Example "Assign FLAG-42 to me":
   [{"id":"asgn","tool":"jira_assign_issue","params":{"issue_key":"FLAG-42","account_id":"me"},"success_criteria":"Assigned"},
@@ -904,9 +1043,34 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
 ── USER ROLES / PROJECT MEMBERS ──
   There is NO tool to fetch user roles. Use jira_get_assignable_users to list who can be assigned,
   then answer with direct_response. Do NOT invent a tool like jira_get_user_roles_for_project.
+  Do NOT invent a tool like jira_get_user_profile — it does not exist.
   Example:
   [{"id":"u","tool":"jira_get_assignable_users","params":{"project_key":"FLAG"}},
    {"id":"done","tool":"direct_response","params":{"message":"Members in FLAG:\n{{u}}\n\nRole information is not available via the current integration."}}]
+
+── ADD MEMBER TO PROJECT ──
+  Use these three tools in sequence to add a user to a Jira project:
+    1. jira_search_user_by_email(email)        → get accountId + displayName
+    2. jira_get_project_roles(project_key)      → get available roles as [{value: role_id, label: role_name}]
+    3. request_selection(roles)                 → user picks which role
+    4. jira_add_project_member(project_key, account_id, role_id)  → adds the user
+    5. direct_response confirming the addition
+
+  "Add a member to FLAG" / "give someone access to FLAG" / "add user to project":
+  → Ask for email first (you need it to find the user), then fetch roles, then add.
+
+  Example plan for "add a member to FLAG":
+  [{"id":"get_email","tool":"ask_user","params":{"question":"What is the email address of the person you want to add to FLAG?"},"success_criteria":"Email provided"},
+   {"id":"find_user","tool":"jira_search_user_by_email","params":{"email":"{{get_email.answer}}"},"success_criteria":"User found"},
+   {"id":"get_roles","tool":"jira_get_project_roles","params":{"project_key":"FLAG"},"success_criteria":"Roles fetched"},
+   {"id":"sel_role","tool":"request_selection","params":{"question":"Which role should {{find_user.displayName}} have in FLAG?","options":"{{get_roles}}","multi_select":false},"success_criteria":"Role selected"},
+   {"id":"add","tool":"jira_add_project_member","params":{"project_key":"FLAG","account_id":"{{find_user.accountId}}","role_id":"{{sel_role.selected}}"},"success_criteria":"Member added"},
+   {"id":"done","tool":"direct_response","params":{"message":"{{find_user.displayName}} has been added to FLAG as {{sel_role.selected_label}}."}}]
+
+  If project is not stated → request_selection from <<JIRA_PROJECTS_PREFETCHED>> first, then proceed with the flow above.
+
+  [Rule] Do not use jira_get_assignable_users + jira_assign_issue as a workaround — those manage issue assignment, not project membership.
+  [Rule] jira_get_user_profile does NOT exist — use jira_search_user_by_email to look up users.
 
 ── MOVE ISSUE TO SPRINT (jira_rank_backlog_issues or jira_update_issue) ──
   Preferred tool: look in AVAILABLE_MCP_TOOLS for jira_rank_backlog_issues or jira_move_issues_to_sprint.
@@ -932,12 +1096,23 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
   "Start sprint" → state="active"
   "Close/end/complete sprint" → state="closed"
 
-  Workflow — fetch sprint list to get sprint_id:
-  [{"id":"get_b","tool":"jira_get_agile_boards","params":{},"success_criteria":"Boards listed"},
+  Workflow — ALWAYS select project first, then fetch boards:
+  CASE A — project IS stated (e.g. "Start sprint in FLAG"):
+  [{"id":"get_b","tool":"jira_get_agile_boards","params":{"project_key":"FLAG"},"success_criteria":"Boards listed"},
    {"id":"get_sp","tool":"jira_get_sprints","params":{"board_id":"{{get_b._items[0].id}}"},"success_criteria":"Sprints listed"},
    {"id":"sel_sp","tool":"request_selection","params":{"question":"Which sprint to start/close?","options":"{{get_sp}}","multi_select":false},"success_criteria":"Sprint selected"},
    {"id":"upd","tool":"jira_update_sprint","params":{"sprint_id":"{{sel_sp.selected}}","state":"active"},"success_criteria":"Sprint started"},
    {"id":"done","tool":"direct_response","params":{"message":"Sprint started."}}]
+
+  CASE B — project NOT stated (e.g. "Start a sprint"):
+  [{"id":"sel_proj","tool":"request_selection","params":{"question":"Which project?","options":"<<JIRA_PROJECTS_PREFETCHED>>","multi_select":false},"success_criteria":"Project selected"},
+   {"id":"get_b","tool":"jira_get_agile_boards","params":{"project_key":"{{sel_proj.selected}}"},"success_criteria":"Boards listed"},
+   {"id":"get_sp","tool":"jira_get_sprints","params":{"board_id":"{{get_b._items[0].id}}"},"success_criteria":"Sprints listed"},
+   {"id":"sel_sp","tool":"request_selection","params":{"question":"Which sprint to start/close?","options":"{{get_sp}}","multi_select":false},"success_criteria":"Sprint selected"},
+   {"id":"upd","tool":"jira_update_sprint","params":{"sprint_id":"{{sel_sp.selected}}","state":"active"},"success_criteria":"Sprint started"},
+   {"id":"done","tool":"direct_response","params":{"message":"Sprint started."}}]
+
+  [Rule] Do not call jira_get_agile_boards with empty params {} — always pass project_key.
 
 ── CREATE SUBTASK ──
   Subtask = jira_create_issue with issue_type="Sub-task" and parent_key set.
@@ -997,17 +1172,33 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
     the field ID is not explicitly stated, respond with direct_response explaining that
     custom field IDs must be known to update them.
 
+  ⚑ ALWAYS add jira_get_issue AFTER jira_update_issue to show the user the full updated issue.
+  ⚑ When referencing form fields in the fields dict, ALWAYS use {{step_id.field_name}} (specific field), NEVER {{step_id}} (entire form result).
+
   Example "Set priority of FLAG-42 to High":
   [{"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"priority":"High"}},"success_criteria":"Priority updated"},
-   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 priority set to High."}}]
+   {"id":"get","tool":"jira_get_issue","params":{"issue_key":"FLAG-42"},"success_criteria":"Issue fetched"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 updated successfully!\n\nPriority set to High.\n\nFull issue details:\n{{get}}"}}]
 
   Example "Add label 'backend' to FLAG-42":
   [{"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"labels":["backend"]}},"success_criteria":"Label added"},
-   {"id":"done","tool":"direct_response","params":{"message":"Label 'backend' added to FLAG-42."}}]
+   {"id":"get","tool":"jira_get_issue","params":{"issue_key":"FLAG-42"},"success_criteria":"Issue fetched"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 updated successfully!\n\nLabel 'backend' added.\n\nFull issue details:\n{{get}}"}}]
 
   Example "Set due date of FLAG-42 to May 1":
   [{"id":"upd","tool":"jira_update_issue","params":{"issue_key":"FLAG-42","fields":{"duedate":"2026-05-01"}},"success_criteria":"Due date set"},
-   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 due date set to May 1, 2026."}}]
+   {"id":"get","tool":"jira_get_issue","params":{"issue_key":"FLAG-42"},"success_criteria":"Issue fetched"},
+   {"id":"done","tool":"direct_response","params":{"message":"FLAG-42 updated successfully!\n\nDue date set to May 1, 2026.\n\nFull issue details:\n{{get}}"}}]
+
+  Example "Update issue (collect missing info via form)":
+  [{"id":"collect","tool":"request_form","params":{"title":"Update Issue","fields":[
+      {"id":"issue_key","label":"Issue Key","type":"text","required":true},
+      {"id":"priority","label":"Priority","type":"text","required":false},
+      {"id":"assignee","label":"Assignee","type":"text","required":false}
+    ]},"success_criteria":"Details collected"},
+   {"id":"upd","tool":"jira_update_issue","params":{"issue_key":"{{collect.issue_key}}","fields":{"priority":"{{collect.priority}}","assignee":"{{collect.assignee}}"}},"success_criteria":"Issue updated"},
+   {"id":"get","tool":"jira_get_issue","params":{"issue_key":"{{collect.issue_key}}"},"success_criteria":"Issue fetched"},
+   {"id":"done","tool":"direct_response","params":{"message":"Issue {{collect.issue_key}} updated successfully!\n\nFull details:\n{{get}}"}}]
 
   If issue_key or field values are missing → collect via request_form (only missing fields).
 
@@ -1104,10 +1295,13 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
     required fields, or permission restrictions.
 
 ── ADVANCED JQL / SEARCH PATTERNS ──
-  Pagination: jira_search supports a 'limit' and 'start_at' (offset) param.
-    Default: use limit=100 for all list queries. For count-only queries use limit=1.
-    If the user wants to see more results beyond the first page → add a start_at param (0-based offset).
-    Example next page: jira_search(jql="...", limit=100, start_at=100)
+  Pagination: jira_search supports 'limit' (max 50), 'start_at' (0-based), and 'page_token' (Cloud cursor).
+    [Rule] Do not use limit > 50.
+    Default: limit=50 for list queries. For count-only queries use limit=1.
+    Jira Cloud returns a nextPageToken when more results exist — always prefer page_token over start_at.
+    First page: start_at=0 (omit page_token). Next page: pass page_token from PAGINATION CONTEXT.
+    When PAGINATION CONTEXT is injected with a page_token → use it directly, don't use start_at.
+    Always end the direct_response with: "Showing X–Y of Z. Say 'next' to see more." when has_more=true.
 
   Custom fields in JQL: use cf[NNNNN] syntax or the exact field name from the project schema.
     Example: cf[10015] = "2026-04-01"   (if field ID 10015 is a date field)
@@ -1180,7 +1374,9 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
   direct_response: "Permission queries are not available via the current integration.
   You can check your project permissions in Jira under Project Settings → Permissions."
 
-  "Is user X active?" → Use jira_search_users(query="X") and check the 'active' field in the result.
+  "Is user X active?" → Use jira_get_assignable_users(project_key=...) and check if X appears in the list.
+    Active users appear in the result; inactive or deactivated users do not.
+    If project is unknown, ask_user for it first. [Rule] jira_search_users does NOT exist.
 
 ── NATURAL LANGUAGE EDGE CASES ──
   Handle these ambiguous phrases by applying CLARIFICATION FIRST rules:
@@ -1194,8 +1390,9 @@ To retrieve active sprints (e.g. "what is the active sprint for me?"):
     If issue_key also unknown → ask for it first.
 
   "Assign to him" / "assign to her" / "assign to them":
-  → No assignee stated. Use ask_user: "Who should I assign this to?"
-    Then jira_search_users to resolve the name to accountId.
+  → No assignee stated. Use jira_get_assignable_users(project_key=...) then request_selection.
+    Pass the selected display name directly as account_id to jira_assign_issue.
+    [Rule] jira_search_users does NOT exist.
 
   "Close everything" / "Done all" / "Mark all as done":
   → Scope is unclear. Use ask_user to clarify scope:
@@ -1227,102 +1424,189 @@ GOOGLE CALENDAR
 ═══════════════════════════════════════════════════════════════════
 
 Use MCP tools from AVAILABLE_MCP_TOOLS. No browser tools.
-user_google_email is in AVAILABLE DATA and auto-injected — do NOT ask for it.
+user_google_email is in AVAILABLE DATA and is auto-injected by executor — NEVER ask for it.
+NEVER call list_calendars first. Always use calendar_id "primary".
+get_events returns PLAIN TEXT — use {{step_id}} in direct_response (no sub-fields).
 
 ── VIEW MEETINGS (get_events) ──
-• NEVER call list_calendars first. Always use calendar_id "primary".
-• get_events returns PLAIN TEXT — use {{step_id}} in direct_response (NO sub-field).
-
-• If the user specifies a date (e.g. "today", "tomorrow", "April 25") → use it directly in time_min/max.
-• If the user does NOT specify a date → ask_user FIRST: "Which date should I check? (e.g. today, tomorrow, April 25)"
-  NEVER default to today without the user saying so.
+• If the user specifies a date → use it directly.
+• If date not stated → ask_user first.
+• get_events returns plain text that already includes meeting details. Display it as-is.
+• If any event in the result has a Google Meet link, it will appear in the text — always show it.
+• For individual event details use get_event(event_id=..., calendar_id="primary") — returns richer data including hangoutLink.
 
 Example — date stated ("show my meetings today"):
-  get_events(calendar_id="primary", time_min="<today>T00:00:00Z", time_max="<today>T23:59:59Z")
-  direct_response(message="Your meetings today:\n{{step_id}}")
+  [{"id":"evts","tool":"get_events","params":{"calendar_id":"primary","time_min":"<today>T00:00:00Z","time_max":"<today>T23:59:59Z"}},
+   {"id":"show","tool":"direct_response","params":{"message":"Your meetings today:\n{{evts}}"}}]
 
-Example — date NOT stated ("show my meetings"):
+Example — date not stated ("show my meetings"):
   [{"id":"ask_date","tool":"ask_user","params":{"question":"Which date should I check meetings for? (e.g. today, tomorrow, April 25)"}},
    {"id":"evts","tool":"get_events","params":{"calendar_id":"primary","time_min":"{{ask_date.answer}}T00:00:00Z","time_max":"{{ask_date.answer}}T23:59:59Z"}},
    {"id":"show","tool":"direct_response","params":{"message":"Your meetings:\n{{evts}}"}}]
 
-── AVAILABLE SLOTS / FREE TIME (query_freebusy) ──
-• "Available slots", "when am I free", "free time" → use query_freebusy, NOT get_events.
-• query_freebusy returns BUSY periods as plain text. FREE time = everything else in working hours.
-• Default working hours: 9 AM to 6 PM (local time). Executor auto-injects email + defaults to today.
-Plan: query_freebusy()  — no params needed, all auto-filled by executor
-      direct_response(message="Your busy periods today:\n{{step_id}}\n\nYour available slots are the gaps between the busy periods above, within your working hours (9 AM – 6 PM).")
+Example — user asks for meet link of a specific event:
+  [{"id":"evts","tool":"get_events","params":{"calendar_id":"primary","time_min":"<today>T00:00:00Z","time_max":"<today>T23:59:59Z"}},
+   {"id":"ask_id","tool":"ask_user","params":{"question":"Which meeting would you like the link for? Here are today's meetings:\n{{evts}}"}},
+   {"id":"evt","tool":"get_event","params":{"event_id":"{{ask_id.answer}}","calendar_id":"primary"}},
+   {"id":"show","tool":"direct_response","params":{"message":"Meeting details:\n{{evt}}\n\nGoogle Meet Link: {{evt.hangoutLink}}"}}]
 
-── CREATE MEETING (manage_event) ──
-CORRECT param names:
-  action="create", summary (title), start_time (RFC3339), end_time (RFC3339),
-  calendar_id="primary", attendees (list of emails or plain string — executor auto-parses)
+── AVAILABLE SLOTS / FREE TIME ──
+• "when am I free", "available slots", "free time" → fetch the day's events and show free gaps.
+Plan:
+  [{"id":"evts","tool":"get_events","params":{"calendar_id":"primary","time_min":"<today>T00:00:00Z","time_max":"<today>T23:59:59Z"}},
+   {"id":"show","tool":"direct_response","params":{"message":"Here are your meetings today:\n{{evts}}\n\nFree slots are the gaps between these within your working hours (9 AM – 6 PM)."}}]
 
-⚠️  CONFLICT CHECK IS MANDATORY before creating any meeting.
-  Always call query_freebusy for the requested time window FIRST.
-  If the slot is busy, use human_review to warn the user and ask if they want to proceed anyway.
-  Only create the meeting after the user confirms.
+── CREATE MEETING (create_event) ──
 
-ALWAYS collect missing info in ONE request_form BEFORE the freebusy check.
-Required fields (collect any that are missing):
-  • title (summary) — what the meeting is called
-  • start_time — when it starts (user gives natural language; executor converts to RFC3339)
-  • duration — how long (e.g. "30 minutes", "1 hour")
-  • attendees — who to invite (emails, or "just me")
+REAL tool name: create_event
+CORRECT params: summary, start_time (RFC3339 e.g. 2026-04-25T14:00:00Z), end_time (RFC3339),
+                calendar_id="primary", attendees (list of email strings or plain comma-separated string)
+NOTE: executor auto-injects user_google_email — never ask for it.
 
-⚑ NEVER send separate ask_user calls for title, start_time, duration, attendees.
-  All missing fields MUST be collected together in a single request_form.
+HOW SLOTS AND DURATION WORK:
+- The executor collects busy times from ALL get_events results across all calendars and auto-injects only FREE slots into the start_time dropdown.
+- The UI handles duration — user picks start_time from the slot dropdown; the UI sends back both start_time AND end_time.
+- Do NOT include a duration field in the meeting form — the UI manages it.
+- Use start_time and end_time directly in create_event (both come from the form/UI response).
 
-MANDATORY plan template for "create a meeting" (all info missing):
+CONFLICT INTENT DETECTION:
+- By default, slots shown to the user are ONLY free (non-busy) slots — conflicting times are excluded.
+- If the user says "evening", "eve", "night", "after 6", "any time", "including busy", "even if busy", "busy time", or similar → the executor auto-includes busy slots in the dropdown labelled "(busy)". In this case still run conflict_gate so user is warned before creating.
+- If the user EXPLICITLY says to proceed at a specific conflicting time (e.g. "book it at 3pm even if busy", "schedule over my existing meeting", "just create it"), skip conflict_gate and create directly.
+- When a slot is picked that is labelled "(busy)", the conflict_gate MUST trigger — tell the user "This time slot has a conflict. Proceed anyway?" and wait for confirmation.
+
+⚠️  FULL CREATE MEETING FLOW — follow this EXACTLY every time:
+
+STEP 1 — Fetch ALL calendars + events FIRST (before asking anything):
+  Call list_calendars to get all calendar IDs, then call get_events for EACH calendar for the full day.
+  The executor merges all events across calendars to compute truly free slots.
+  • If the user already stated a date → use it.
+  • If no date stated → ask_user for the date first, THEN list_calendars + get_events.
+
+STEP 2 — Collect meeting details in ONE request_form:
+  Show the form AFTER fetching the calendar.
+  Fields: title, start_time (executor auto-converts to free-slot dropdown), attendees.
+  Do NOT include a duration field — the UI handles it.
+
+  ⚑ SMART FORM RULE — pre-fill fields already known from the user's message:
+    • title/summary already stated → set "default": "<title>", "required": false
+    • attendees/emails already stated → set "default": "<emails>", "required": false
+    • Any other field the user already mentioned → pre-fill as default, mark required:false
+    • Only show a field as required:true when the value is genuinely unknown
+    EXAMPLE: "schedule a meeting called Sprint Review with john@co.com on Tuesday"
+      → title default="Sprint Review" required:false, attendees default="john@co.com" required:false
+      → only start_time is required (unknown)
+
+STEP 3 — Conflict check (skip if user explicitly requested a conflicting slot):
+  Call get_events for the specific window (start_time → end_time from form).
+  If conflict found → human_review. If no conflict → skip human_review.
+
+STEP 4 — Create the event with create_event using start_time and end_time from the form.
+
+STEP 5 — direct_response confirming the created meeting.
+
+─────────────────────────────────────────────────────
+Required plan template — "create a meeting" (no date/time given):
 [
-  {"id":"meeting_info","tool":"request_form","params":{"title":"New Meeting Details","fields":[
+  {"id":"ask_date","tool":"ask_user","params":{"question":"Which date would you like to schedule the meeting? (e.g. today, tomorrow, April 25)"},"success_criteria":"Date received"},
+  {"id":"day_events","tool":"get_events","params":{"calendar_id":"primary","time_min":"{{ask_date.answer}}T00:00:00Z","time_max":"{{ask_date.answer}}T23:59:59Z"},"success_criteria":"Primary calendar fetched"},
+  {"id":"day_events_work","tool":"get_events","params":{"calendar_id":"{{user_google_email}}","time_min":"{{ask_date.answer}}T00:00:00Z","time_max":"{{ask_date.answer}}T23:59:59Z"},"success_criteria":"Work calendar fetched"},
+  {"id":"meeting_info","tool":"request_form","params":{"title":"New Meeting Details","description":"Your existing meetings on {{ask_date.answer}}:\n{{day_events}}\n{{day_events_work}}\n\nSelect a free slot for your meeting.","fields":[
       {"id":"title","label":"Meeting Title","type":"text","required":true,"placeholder":"e.g. Quarterly Review"},
-      {"id":"start_time","label":"Start Date & Time","type":"text","required":true,"placeholder":"e.g. tomorrow at 2pm, April 25 at 10am"},
-      {"id":"duration","label":"Duration","type":"text","required":true,"placeholder":"e.g. 30 minutes, 1 hour"},
-      {"id":"attendees","label":"Attendees","type":"text","required":true,"placeholder":"emails comma-separated, or 'just me'"}
+      {"id":"start_time","label":"Start Time","type":"text","required":true,"placeholder":"Pick a free slot"},
+      {"id":"attendees","label":"Attendees (emails)","type":"text","required":false,"placeholder":"emails comma-separated, or leave blank for just you"}
     ]},"success_criteria":"Meeting details collected"},
-  {"id":"check_busy","tool":"query_freebusy","params":{"time_min":"{{meeting_info.start_time}}","time_max":"{{meeting_info.start_time}}"},
-   "success_criteria":"Freebusy checked"},
-  {"id":"conflict_gate","tool":"human_review","params":{"question":"You have a conflict at this time:\n{{check_busy}}\n\nDo you still want to create the meeting?"},
-   "condition":"{{check_busy}} contains busy period",
-   "success_criteria":"User confirmed or slot is free — skip this step if no conflict"},
-  {"id":"create_evt","tool":"manage_event","params":{"action":"create","summary":"{{meeting_info.title}}","start_time":"{{meeting_info.start_time}}","duration":"{{meeting_info.duration}}","attendees":"{{meeting_info.attendees}}","calendar_id":"primary"}},
-  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting created: {{create_evt}}"}}
+  {"id":"create_evt","tool":"create_event","params":{"summary":"{{meeting_info.title}}","start_time":"{{meeting_info.start_time}}","end_time":"{{meeting_info.end_time}}","attendees":"{{meeting_info.attendees}}","calendar_id":"primary","send_updates":"all"},"success_criteria":"Event created"},
+  {"id":"notify","tool":"send_gmail_message","params":{"to":"{{meeting_info.attendees}}","subject":"Meeting Invite: {{meeting_info.title}}","body":"Hi,\n\nYou have been invited to a meeting:\n\nTitle: {{meeting_info.title}}\nDate: {{ask_date.answer}}\nTime: {{meeting_info.start_time}} – {{meeting_info.end_time}}\nMeet Link: {{create_evt.hangoutLink}}\n\nPlease find the calendar invite in your inbox.\n\nRegards"},"success_criteria":"Invite email sent","condition":"{{meeting_info.attendees}} is not empty"},
+  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting '{{meeting_info.title}}' created on {{ask_date.answer}}.\n\nAttendees: {{meeting_info.attendees}}\nMeet Link: {{create_evt.hangoutLink}}\n\nCalendar invite + email sent to attendees."}}
 ]
 
-If the task already provides SOME fields (e.g. title is given but attendees/time are not):
-  Include only the MISSING fields in the request_form. Never re-ask for values already stated.
-
-Example — title given, rest missing ("create a meeting called Weekly Sync"):
+─────────────────────────────────────────────────────
+Required plan template — "create a meeting asap" / "right now" / "today":
+  Use today's date directly. Do NOT ask for date separately.
 [
-  {"id":"meeting_info","tool":"request_form","params":{"title":"Weekly Sync — Meeting Details","fields":[
-      {"id":"start_time","label":"Start Date & Time","type":"text","required":true,"placeholder":"e.g. tomorrow at 2pm"},
-      {"id":"duration","label":"Duration","type":"text","required":true,"placeholder":"e.g. 30 minutes, 1 hour"},
-      {"id":"attendees","label":"Attendees","type":"text","required":true,"placeholder":"emails, or 'just me'"}
-    ]},"success_criteria":"Details collected"},
-  {"id":"check_busy","tool":"query_freebusy","params":{"time_min":"{{meeting_info.start_time}}","time_max":"{{meeting_info.start_time}}"},"success_criteria":"Freebusy checked"},
-  {"id":"conflict_gate","tool":"human_review","params":{"question":"Conflict detected:\n{{check_busy}}\n\nProceed anyway?"},"success_criteria":"Confirmed"},
-  {"id":"create_evt","tool":"manage_event","params":{"action":"create","summary":"Weekly Sync","start_time":"{{meeting_info.start_time}}","duration":"{{meeting_info.duration}}","attendees":"{{meeting_info.attendees}}","calendar_id":"primary"}},
-  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting created: {{create_evt}}"}}
+  {"id":"day_events","tool":"get_events","params":{"calendar_id":"primary","time_min":"<TODAY>T00:00:00Z","time_max":"<TODAY>T23:59:59Z"},"success_criteria":"Primary calendar fetched"},
+  {"id":"day_events_work","tool":"get_events","params":{"calendar_id":"{{user_google_email}}","time_min":"<TODAY>T00:00:00Z","time_max":"<TODAY>T23:59:59Z"},"success_criteria":"Work calendar fetched"},
+  {"id":"meeting_info","tool":"request_form","params":{"title":"Quick Meeting Details","description":"Your meetings today:\n{{day_events}}\n{{day_events_work}}\n\nSelect a free slot for your meeting.","fields":[
+      {"id":"title","label":"Meeting Title","type":"text","required":true,"placeholder":"e.g. Quick Sync"},
+      {"id":"start_time","label":"Start Time","type":"text","required":true,"placeholder":"Pick a free slot"},
+      {"id":"attendees","label":"Attendees (emails)","type":"text","required":false,"placeholder":"emails comma-separated, or leave blank for just you"}
+    ]},"success_criteria":"Meeting details collected"},
+  {"id":"create_evt","tool":"create_event","params":{"summary":"{{meeting_info.title}}","start_time":"{{meeting_info.start_time}}","end_time":"{{meeting_info.end_time}}","attendees":"{{meeting_info.attendees}}","calendar_id":"primary","send_updates":"all"},"success_criteria":"Event created"},
+  {"id":"notify","tool":"send_gmail_message","params":{"to":"{{meeting_info.attendees}}","subject":"Meeting Invite: {{meeting_info.title}}","body":"Hi,\n\nYou have been invited to a meeting:\n\nTitle: {{meeting_info.title}}\nDate: Today\nTime: {{meeting_info.start_time}} – {{meeting_info.end_time}}\nMeet Link: {{create_evt.hangoutLink}}\n\nPlease find the calendar invite in your inbox.\n\nRegards"},"success_criteria":"Invite email sent","condition":"{{meeting_info.attendees}} is not empty"},
+  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting '{{meeting_info.title}}' created today.\n\nAttendees: {{meeting_info.attendees}}\nMeet Link: {{create_evt.hangoutLink}}\n\nCalendar invite + email sent to attendees."}}
 ]
 
-IMPORTANT:
-- If query_freebusy returns NO busy periods overlapping the requested slot → skip human_review, proceed directly to manage_event.
-- If there IS a conflict → show human_review with the conflict details. Only proceed if user says yes.
+─────────────────────────────────────────────────────
+Required plan template — date already given (e.g. "create meeting tomorrow"):
+  Replace <DATE> with the actual date from the user's message (YYYY-MM-DD).
+[
+  {"id":"day_events","tool":"get_events","params":{"calendar_id":"primary","time_min":"<DATE>T00:00:00Z","time_max":"<DATE>T23:59:59Z"},"success_criteria":"Primary calendar fetched"},
+  {"id":"day_events_work","tool":"get_events","params":{"calendar_id":"{{user_google_email}}","time_min":"<DATE>T00:00:00Z","time_max":"<DATE>T23:59:59Z"},"success_criteria":"Work calendar fetched"},
+  {"id":"meeting_info","tool":"request_form","params":{"title":"New Meeting Details","description":"Your existing meetings on <DATE>:\n{{day_events}}\n{{day_events_work}}\n\nSelect a free slot for your meeting.","fields":[
+      {"id":"title","label":"Meeting Title","type":"text","required":true,"placeholder":"e.g. Quarterly Review"},
+      {"id":"start_time","label":"Start Time","type":"text","required":true,"placeholder":"Pick a free slot"},
+      {"id":"attendees","label":"Attendees (emails)","type":"text","required":false,"placeholder":"emails comma-separated, or leave blank for just you"}
+    ]},"success_criteria":"Meeting details collected"},
+  {"id":"create_evt","tool":"create_event","params":{"summary":"{{meeting_info.title}}","start_time":"{{meeting_info.start_time}}","end_time":"{{meeting_info.end_time}}","attendees":"{{meeting_info.attendees}}","calendar_id":"primary","send_updates":"all"},"success_criteria":"Event created"},
+  {"id":"notify","tool":"send_gmail_message","params":{"to":"{{meeting_info.attendees}}","subject":"Meeting Invite: {{meeting_info.title}}","body":"Hi,\n\nYou have been invited to a meeting:\n\nTitle: {{meeting_info.title}}\nDate: <DATE>\nTime: {{meeting_info.start_time}} – {{meeting_info.end_time}}\nMeet Link: {{create_evt.hangoutLink}}\n\nPlease find the calendar invite in your inbox.\n\nRegards"},"success_criteria":"Invite email sent","condition":"{{meeting_info.attendees}} is not empty"},
+  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting '{{meeting_info.title}}' created on <DATE>.\n\nAttendees: {{meeting_info.attendees}}\nMeet Link: {{create_evt.hangoutLink}}\n\nCalendar invite + email sent to attendees."}}
+]
 
+─────────────────────────────────────────────────────
+Required plan template — user explicitly wants a CONFLICTING/BUSY slot (e.g. "book at 3pm even if busy", "schedule over existing meeting"):
+  Skip conflict_gate entirely — create directly.
+  Replace <DATE>, <START_TIME_UTC>, <END_TIME_UTC> from the user's message.
+[
+  {"id":"create_evt","tool":"create_event","params":{"summary":"<MEETING_TITLE>","start_time":"<START_TIME_UTC>","end_time":"<END_TIME_UTC>","attendees":"<ATTENDEES>","calendar_id":"primary","send_updates":"all"},"success_criteria":"Event created"},
+  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting '<MEETING_TITLE>' created at <START_TIME_UTC>.\n\nMeet Link: {{create_evt.hangoutLink}}"}}
+]
 
-── UPDATE / DELETE MEETING (manage_event) ──
-To update or delete, you need the event_id. Workflow:
-  1. get_events — find the meeting (returns plain text with event IDs)
-  2. ask_user — ask which meeting to update/delete (show the list from step 1)
-  3. manage_event(action="update"|"delete", event_id="<from user>", ...)
+─────────────────────────────────────────────────────
+RULES:
+- ALWAYS fetch the full day's events (both calendars) BEFORE the form so user sees what's booked.
+- Slots shown are FREE only (busy times excluded) — executor injects them automatically. No check_busy step needed.
+- If user asked for evening/any time/busy slots, executor shows those too labelled "(busy)" — still no check_busy step.
+- Do NOT include a duration field in the form — the UI handles duration and returns both start_time and end_time.
+- Do NOT include check_busy or conflict_gate steps — the executor handles busy-slot warnings automatically via human_review interrupt if user picks a "(busy)" slot.
+- Use {{meeting_info.start_time}} and {{meeting_info.end_time}} in create_event.
+- ALWAYS pass send_updates="all" to create_event — auto-sends Google Calendar invites.
+- ALWAYS send a send_gmail_message after create_event when attendees are present, with the meet link.
+- If no attendees → skip send_gmail_message step.
+- ALWAYS show the Google Meet link ({{create_evt.hangoutLink}}) in the final confirmation.
+- "asap"/"now" → use today's date, skip ask_date, show today's calendar first.
 
-Example for "delete the 2pm meeting":
+── UPDATE MEETING (modify_event) ──
+Params: event_id (required), calendar_id="primary", plus any fields to change (summary, start_time, end_time, attendees).
+Workflow:
+  1. get_events — list meetings for the relevant day
+  2. ask_user — which event_id to update
+  3. modify_event(event_id="...", calendar_id="primary", <updated fields>)
+  4. direct_response confirming
+
+Example ("reschedule my 2pm meeting to 4pm today"):
 [
   {"id":"get_evt","tool":"get_events","params":{"calendar_id":"primary","time_min":"<today>T00:00:00Z","time_max":"<today>T23:59:59Z"}},
-  {"id":"ask_id","tool":"ask_user","params":{"question":"Which meeting ID should I delete? Here are your meetings:\n{{get_evt}}"}},
-  {"id":"del_evt","tool":"manage_event","params":{"action":"delete","event_id":"{{ask_id.answer}}","calendar_id":"primary"}},
-  {"id":"confirm","tool":"direct_response","params":{"message":"Done: {{del_evt}}"}}
+  {"id":"ask_id","tool":"ask_user","params":{"question":"Which meeting should I reschedule? Here are today's meetings:\n{{get_evt}}\n\nPlease give me the event ID."}},
+  {"id":"upd_evt","tool":"modify_event","params":{"event_id":"{{ask_id.answer}}","calendar_id":"primary","start_time":"<today>T16:00:00Z","end_time":"<today>T17:00:00Z"}},
+  {"id":"confirm","tool":"direct_response","params":{"message":"Meeting rescheduled: {{upd_evt}}"}}
+]
+
+── DELETE MEETING (delete_event) ──
+Workflow:
+  1. get_events — list meetings
+  2. ask_user — which event_id to delete
+  3. human_review — confirm deletion (destructive action)
+  4. delete_event(event_id="...", calendar_id="primary")
+  5. direct_response confirming
+
+Example ("delete the 2pm meeting"):
+[
+  {"id":"get_evt","tool":"get_events","params":{"calendar_id":"primary","time_min":"<today>T00:00:00Z","time_max":"<today>T23:59:59Z"}},
+  {"id":"ask_id","tool":"ask_user","params":{"question":"Which meeting should I delete? Here are today's meetings:\n{{get_evt}}\n\nPlease give me the event ID."}},
+  {"id":"confirm_del","tool":"human_review","params":{"question":"Are you sure you want to delete the meeting with ID {{ask_id.answer}}? This cannot be undone."}},
+  {"id":"del_evt","tool":"delete_event","params":{"event_id":"{{ask_id.answer}}","calendar_id":"primary"}},
+  {"id":"done","tool":"direct_response","params":{"message":"Meeting deleted successfully."}}
 ]
 
 ═══════════════════════════════════════════════════════════════════
@@ -1380,7 +1664,7 @@ Workflow: search → ask_user which message → get content
   {"id":"show","tool":"direct_response","params":{"message":"Email content:\n{{read}}"}}
 
 ── BATCH ACTIONS (Mark as Read / Delete / Archive) ──
-CRITICAL: NEVER use `search_gmail_messages` to fetch IDs for batch actions (it returns plain text).
+Important: NEVER use `search_gmail_messages` to fetch IDs for batch actions (it returns plain text).
 - For SPECIFIC messages: First use `list_unread_message_ids` (limit 500) then `batch_modify_gmail_message_labels`.
 - For ALL / EVERYTHING / ENTIRE INBOX: Use `batch_apply_labels_to_all` directly. It handles thousands of messages automatically.
   [{"id":"bulk","tool":"batch_apply_labels_to_all","params":{"query":"is:unread","remove_label_ids":["UNREAD"]}},
@@ -1959,276 +2243,6 @@ def _fix_json_control_chars(s: str) -> str:
     return "".join(result)
 
 
-import re as _re_fast
-
-# ── Fast-path patterns for common Jira queries (bypass LLM, instant response) ─
-# Each entry: (compiled_regex, jql_template, response_template, limit)
-# jql_template may reference group(1) from the regex match.
-_FAST_JIRA_DIRECT: list[tuple] = [
-    # "how many tickets/issues do I have" / "how many issues do we have" (personal or team)
-    (
-        _re_fast.compile(
-            r"\b(how many|count)\b.{0,40}\b(tickets?|issues?|tasks?|blockers?)\b.{0,40}\b(i have|do i have|do we have|are there|assigned to me|mine)\b",
-            _re_fast.IGNORECASE,
-        ),
-        "assignee = currentUser() AND status != Done",
-        "You have {total} open issues assigned to you.",
-        1,
-    ),
-    # "count my open issues" / "count my tickets" (no trailing clause)
-    (
-        _re_fast.compile(
-            r"\b(count|how many)\b.{0,15}\bmy\b.{0,25}\b(tickets?|issues?|tasks?)\b",
-            _re_fast.IGNORECASE,
-        ),
-        "assignee = currentUser() AND status != Done",
-        "You have {total} open issues assigned to you.",
-        1,
-    ),
-    # "which (all) open tasks/issues do i have"
-    (
-        _re_fast.compile(
-            r"\bwhich\b.{0,30}\b(tasks?|issues?|tickets?)\b.{0,30}\b(i have|do i have)\b",
-            _re_fast.IGNORECASE,
-        ),
-        "assignee = currentUser() AND status != Done ORDER BY updated DESC",
-        "Your open issues:\n{results}",
-        25,
-    ),
-    # "show/list/give me my tickets/issues" — all "my X" phrasings
-    (
-        _re_fast.compile(
-            r"\b(show|list|display|view|give\s+me|get\s+me|fetch)\b.{0,20}\bmy\b.{0,20}\b(open\s+)?(tickets?|issues?|tasks?)\b",
-            _re_fast.IGNORECASE,
-        ),
-        "assignee = currentUser() AND status != Done ORDER BY updated DESC",
-        "Your open issues:\n{results}",
-        25,
-    ),
-    # "what are my tasks / what's on my plate / what do i have"
-    (
-        _re_fast.compile(
-            r"\b(what\s+(are|is)\s+my|what.{0,10}i\s+(have|need\s+to)|what.{0,10}on\s+my\s+plate)\b.{0,20}\b(tickets?|issues?|tasks?|work|todo)?\b",
-            _re_fast.IGNORECASE,
-        ),
-        "assignee = currentUser() AND status != Done ORDER BY updated DESC",
-        "Your open issues:\n{results}",
-        25,
-    ),
-    # "show unassigned issues" — unassigned before type noun
-    (
-        _re_fast.compile(
-            r"\b(show|list|display|what|are there)\b.{0,20}\bunassigned\b.{0,20}\b(tickets?|issues?|tasks?)\b",
-            _re_fast.IGNORECASE,
-        ),
-        "assignee is EMPTY AND sprint in openSprints() AND status != Done",
-        "Unassigned issues in the active sprint:\n{results}",
-        25,
-    ),
-    # "what tasks are unassigned?" — type noun before unassigned
-    (
-        _re_fast.compile(
-            r"\b(tasks?|issues?|tickets?)\b.{0,25}\bare\s+unassigned\b",
-            _re_fast.IGNORECASE,
-        ),
-        "assignee is EMPTY AND sprint in openSprints() AND status != Done",
-        "Unassigned issues in the active sprint:\n{results}",
-        25,
-    ),
-]
-
-# Priority-filter fast paths (one per priority level)
-# Pattern uses s? so both "blocker" and "blockers" match.
-for _pri in ("Blocker", "Critical", "High", "Medium", "Low"):
-    _FAST_JIRA_DIRECT.append(
-        (
-            _re_fast.compile(
-                rf"\b(show|list|display|are\s+there)\b.{{0,25}}\b{_pri.lower()}s?\b.{{0,25}}\b(tickets?|issues?|tasks?|priority)?\b",
-                _re_fast.IGNORECASE,
-            ),
-            f"priority = {_pri} AND status != Done ORDER BY updated DESC",
-            f"{_pri} open issues:\n{{results}}",
-            25,
-        )
-    )
-
-# Status-filter fast paths
-_STATUS_MAP = {
-    "in progress": "In Progress",
-    "in review": "In Review",
-    "to do": "To Do",
-    "done": "Done",
-    "testing": "Testing",
-    "backlog": "Backlog",
-}
-for _slug, _jira_status in _STATUS_MAP.items():
-    _FAST_JIRA_DIRECT.append(
-        (
-            _re_fast.compile(
-                rf"\b(show|list|display|what)\b.{{0,20}}\b({_slug.replace(' ', r'[- ]')})\b.{{0,20}}\b(tickets?|issues?|tasks?)?\b",
-                _re_fast.IGNORECASE,
-            ),
-            f'status = "{_jira_status}" AND sprint in openSprints() ORDER BY updated DESC',
-            f"{_jira_status} issues:\n{{results}}",
-            25,
-        )
-    )
-
-
-def _fast_jira_plan(task: str) -> list | None:
-    """Return a pre-built 2-step plan for simple Jira queries, bypassing the LLM.
-
-    Returns None if the task doesn't match a known fast-path pattern,
-    in which case the caller should fall through to the full planner.
-    """
-    for pattern, jql, response_tmpl, limit in _FAST_JIRA_DIRECT:
-        if pattern.search(task):
-            logger.info("[PLANNER] Fast-path match for Jira query: %s", pattern.pattern[:60])
-            return [
-                {
-                    "id": "jira_q",
-                    "tool": "jira_search",
-                    "description": f"Search Jira: {jql[:80]}",
-                    "params": {"jql": jql, "limit": limit},
-                    "success_criteria": "Issues retrieved",
-                },
-                {
-                    "id": "show",
-                    "tool": "direct_response",
-                    "description": "Present results",
-                    "params": {"message": "{{jira_q}}"},
-                    "success_criteria": "Results shown",
-                },
-            ]
-    return None
-
-
-# ── Fast-path patterns for common Gmail read queries ─────────────────────────
-# Each entry: (compiled_regex, gmail_query_string, description)
-_FAST_GMAIL_READ: list[tuple] = [
-    # "show my unread emails" / "any new emails?" / "any unread?"
-    (
-        _re_fast.compile(
-            r"\b(show|check|list|any|get|fetch|display)\b.{0,20}\bunread\b.{0,20}\b(emails?|messages?|mail)?\b"
-            r"|\bany\s+(new|unread)\s*(emails?|messages?|mail)?\b",
-            _re_fast.IGNORECASE,
-        ),
-        "is:unread in:inbox",
-        "Your unread emails",
-    ),
-    # "check my inbox" / "what's in my inbox"
-    (
-        _re_fast.compile(
-            r"\b(check|show|open|view|what.{0,10}in)\b.{0,15}\bmy\b.{0,10}\binbox\b"
-            r"|\bmy\s+inbox\b",
-            _re_fast.IGNORECASE,
-        ),
-        "in:inbox",
-        "Your inbox",
-    ),
-    # "show my sent emails"
-    (
-        _re_fast.compile(
-            r"\b(show|list|display|get)\b.{0,15}\b(my\s+)?(sent|outbox)\b.{0,15}\b(emails?|messages?|mail)?\b",
-            _re_fast.IGNORECASE,
-        ),
-        "in:sent",
-        "Your sent emails",
-    ),
-    # "show starred emails"
-    (
-        _re_fast.compile(
-            r"\b(show|list|display|get)\b.{0,15}\bstarred\b.{0,15}\b(emails?|messages?|mail)?\b",
-            _re_fast.IGNORECASE,
-        ),
-        "is:starred",
-        "Your starred emails",
-    ),
-    # "show important emails"
-    (
-        _re_fast.compile(
-            r"\b(show|list|display|get)\b.{0,15}\bimportant\b.{0,15}\b(emails?|messages?|mail)?\b",
-            _re_fast.IGNORECASE,
-        ),
-        "is:important",
-        "Your important emails",
-    ),
-    # "show emails with attachments"
-    (
-        _re_fast.compile(
-            r"\b(show|list|display|get|find)\b.{0,20}\b(emails?|messages?|mail)\b.{0,20}\battachment(s)?\b"
-            r"|\battachment(s)?\b.{0,20}\b(emails?|messages?|mail)\b",
-            _re_fast.IGNORECASE,
-        ),
-        "has:attachment in:inbox",
-        "Emails with attachments",
-    ),
-    # "show emails from today" / "show emails I sent today"
-    (
-        _re_fast.compile(
-            r"\b(show|list|get|check)\b.{0,20}\b(emails?|messages?|mail)\b.{0,20}\btoday\b"
-            r"|\btoday.{0,10}\b(emails?|messages?|mail)\b",
-            _re_fast.IGNORECASE,
-        ),
-        "after:today in:inbox",
-        "Today's emails",
-    ),
-    # "show spam" / "show emails in spam"
-    (
-        _re_fast.compile(
-            r"\b(show|list|check)\b.{0,20}\b(in\s+)?(spam|junk)\b",
-            _re_fast.IGNORECASE,
-        ),
-        "in:spam",
-        "Spam folder",
-    ),
-]
-
-
-def _fast_gmail_plan(task: str) -> list | None:
-    """Return a pre-built 2-step plan for simple Gmail read queries, bypassing the LLM.
-
-    Only covers pure read/search operations (Sections 1, partial 11).
-    Send/reply/forward/label flows are too variable — those go to the LLM.
-    Returns None if not a fast-path match.
-    """
-    # Don't fast-path if task mentions a specific sender/subject — those need the LLM
-    # to compose the right query string.
-    _SPECIFIC_PATTERNS = _re_fast.compile(
-        r"\bfrom\b|\bsubject\b|\babout\b|\bregarding\b|\bsent by\b|\bby\b\s+[A-Z]",
-        _re_fast.IGNORECASE,
-    )
-    if _SPECIFIC_PATTERNS.search(task):
-        return None
-
-    # Don't fast-path send/reply/forward/draft actions
-    _ACTION_PATTERNS = _re_fast.compile(
-        r"\b(send|reply|forward|draft|compose|write|respond|email\s+\w+@|ping\b|drop.{0,5}message)\b",
-        _re_fast.IGNORECASE,
-    )
-    if _ACTION_PATTERNS.search(task):
-        return None
-
-    for pattern, gmail_query, description in _FAST_GMAIL_READ:
-        if pattern.search(task):
-            logger.info("[PLANNER] Gmail fast-path match: %s", pattern.pattern[:60])
-            return [
-                {
-                    "id": "gmail_q",
-                    "tool": "search_gmail_messages",
-                    "description": description,
-                    "params": {"query": gmail_query},
-                    "success_criteria": "Emails retrieved",
-                },
-                {
-                    "id": "show",
-                    "tool": "direct_response",
-                    "description": "Present results",
-                    "params": {"message": "{{gmail_q}}"},
-                    "success_criteria": "Results shown",
-                },
-            ]
-    return None
 
 
 async def planner_node(state: AgentState) -> dict:
@@ -2252,119 +2266,6 @@ async def planner_node(state: AgentState) -> dict:
 
     logger.info("[PLANNER] Planning task: %s", task[:100])
 
-    # ── Special case: "what's in the current sprint" ────────────────────────
-    import re as _re_sprint
-
-    if _re_sprint.search(
-        r"\b(what.?s|what.?is)\b.{0,20}\b(in|current)\b.{0,10}\bsprint\b",
-        task,
-        _re_sprint.IGNORECASE,
-    ):
-        logger.info("[PLANNER] Special case: current sprint query")
-        cached_projects = _cache_get("jira_projects") or []
-        sprint_plan = [
-            {
-                "id": "sel_proj",
-                "tool": "request_selection",
-                "description": "Select project to check sprints",
-                "params": {
-                    "question": "Which project do you want to check the current sprint for?",
-                    "options": cached_projects,
-                    "multi_select": False,
-                },
-                "success_criteria": "Project selected",
-            },
-            {
-                "id": "get_boards",
-                "tool": "jira_get_agile_boards",
-                "description": "Get agile boards for selected project",
-                "params": {"project_key": "{{sel_proj.selected}}"},
-                "success_criteria": "Boards retrieved",
-            },
-            {
-                "id": "sel_board",
-                "tool": "request_selection",
-                "description": "Select board to check sprints",
-                "params": {
-                    "question": "Which board do you want to check?",
-                    "options": "{{get_boards}}",
-                    "multi_select": False,
-                },
-                "success_criteria": "Board selected",
-            },
-            {
-                "id": "get_sprints",
-                "tool": "jira_get_sprints_from_board",
-                "description": "Get active sprints for selected board",
-                "params": {"board_id": "{{sel_board.selected}}", "state": "active"},
-                "success_criteria": "Active sprints retrieved",
-            },
-            {
-                "id": "sel_sprint",
-                "tool": "request_selection",
-                "description": "Select active sprint (auto-selected if only one)",
-                "params": {
-                    "question": "Which active sprint?",
-                    "options": "{{get_sprints}}",
-                    "multi_select": False,
-                },
-                "success_criteria": "Sprint selected",
-            },
-            {
-                "id": "get_issues",
-                "tool": "jira_get_sprint_issues",
-                "description": "Get issues in selected sprint",
-                "params": {"sprint_id": "{{sel_sprint.selected}}", "limit": 100},
-                "success_criteria": "Sprint issues retrieved",
-            },
-            {
-                "id": "response",
-                "tool": "direct_response",
-                "description": "Show sprint issues",
-                "params": {"message": "{{get_issues}}"},
-                "success_criteria": "Results displayed",
-            },
-        ]
-        cost = COST_PER_CALL["planner"]
-        return {
-            "plan": sprint_plan,
-            "current_step_index": 0,
-            "status": "executing",
-            "retry_count": 0,
-            "replan_count": state.get("replan_count", 0),
-            "steps_taken": state.get("steps_taken", 0),
-            "estimated_cost": state.get("estimated_cost", 0.0),
-            "step_results": [],
-            "flow_data": {},
-            "messages": [
-                AIMessage(
-                    content=f"Plan created with {len(sprint_plan)} steps. Starting execution..."
-                )
-            ],
-        }
-
-    # ── Fast path: bypass LLM for simple Jira or Gmail queries ──────────────
-    fast_plan = _fast_jira_plan(task) or _fast_gmail_plan(task)
-    if fast_plan:
-        logger.info("[PLANNER] Fast-path plan returned (%d steps)", len(fast_plan))
-        cost = COST_PER_CALL["planner"]
-        return {
-            "plan": fast_plan,
-            "current_step_index": 0,
-            "status": "executing",
-            "retry_count": 0,
-            "replan_count": state.get("replan_count", 0),
-            "steps_taken": state.get("steps_taken", 0),
-            "estimated_cost": state.get("estimated_cost", 0.0),  # no LLM cost
-            "step_results": [],
-            "flow_data": {},
-            "messages": [
-                AIMessage(
-                    content=f"Plan created with {len(fast_plan)} steps. Starting execution..."
-                )
-            ],
-        }
-
     llm = get_planner_llm()
 
     # Inject configured sites so the planner knows what browser_login(site=?) accepts
@@ -2382,8 +2283,11 @@ async def planner_node(state: AgentState) -> dict:
     context_parts = [f"TASK: {task}"]
     context_parts.append(
         f"TODAY'S DATE: {_today}  "
-        "(ONLY use this when the user explicitly says 'today', 'this week', 'yesterday', etc. "
-        "NEVER auto-fill a date the user did not mention — ask_user for the date instead.)"
+        "Use this to resolve ALL natural-language date references the user gives you. "
+        "Examples: 'today' → {_today}, 'yesterday' → one day before, 'this week' → startOfWeek(), "
+        "'last month' → startOfMonth(-1)/endOfMonth(-1), 'April 20' → the nearest April 20, "
+        "'all time' / 'ever' → omit date filter entirely, 'custom range' → collect via form. "
+        "NEVER auto-fill a date the user did NOT mention — ask_user if no date reference is given."
     )
 
     context_parts.append(f"CONFIGURED SITES (use these names with browser_login): [{site_names}]")
@@ -2494,15 +2398,63 @@ async def planner_node(state: AgentState) -> dict:
     flow_data = state.get("flow_data", {})
     merged_data = {**known_data, **flow_data}
     if merged_data:
-        context_parts.append(
-            f"AVAILABLE DATA (already known — do NOT ask the user for these): {json.dumps(merged_data, default=str)[:2000]}"
-        )
+        # Remove sensitive/PII-like fields before injecting into planner context
+        redacted = dict(merged_data)
+        redacted.pop("user_google_email", None)
+        # Separate out cross-turn context keys for clearer injection
+        _pagination = redacted.pop("_last_list_result", None)
+        _last_action = redacted.pop("_last_action", None)
+        if _last_action and isinstance(_last_action, dict):
+            _prev_task = _last_action.get('task', '')
+            _prev_tools = _last_action.get('tools', [])
+            context_parts.append(
+                f"Context from prior turn: previous request was about [{_prev_task[:80]}], "
+                f"tools used: {_prev_tools}. "
+                f"Short follow-up messages like 'in flag?' or 'and for X?' refer to repeating "
+                f"the same operation for the newly mentioned target."
+            )
+        if redacted:
+            context_parts.append(
+                f"AVAILABLE DATA (already known — do NOT ask the user for these): {json.dumps(redacted, default=str)[:2000]}"
+            )
+        if _pagination and isinstance(_pagination, dict):
+            _shown = _pagination.get("shown", 0)
+            _total = _pagination.get("total")
+            _next = _pagination.get("next_start_at", _shown)
+            _has_more = _pagination.get("has_more", False)
+            _tool = _pagination.get("tool", "")
+            _query = _pagination.get("query", "")
+            _sprint_id = _pagination.get("sprint_id", "")
+            _limit = _pagination.get("limit", 50)
+            _next_page_token = _pagination.get("page_token_for_next", "") or _pagination.get("next_page_token", "")
+            _total_str = f" of {_total}" if _total is not None else ""
+            _more_str = f" ({_total - _next} more available)" if (_total is not None and _has_more) else (" (more available — cursor pagination)" if _has_more else " (no more results)")
+            if _next_page_token:
+                _next_page_note = (
+                    f"  ⚑ Jira returned a page_token — use it for the next page (more reliable than start_at).\n"
+                    f"  Next page: jira_search(jql=\"{_query}\", page_token=\"{_next_page_token}\", limit={_limit})\n"
+                    f"  Do NOT use start_at when page_token is available — start_at is ignored by Jira Cloud cursor pagination.\n"
+                )
+            else:
+                _next_page_note = f"  To show NEXT page: use start_at={_next} with limit={_limit}\n"
+            context_parts.append(
+                f"PAGINATION CONTEXT — last list result:\n"
+                f"  Tool used: {_tool}\n"
+                f"  Query/sprint: {_query or _sprint_id}\n"
+                f"  Shown so far: {_shown}{_total_str} items{_more_str}\n"
+                f"{_next_page_note}"
+                f"  To show from beginning: use start_at=0 (omit page_token)\n"
+                f"\n"
+                f"  If the user says 'next', 'more', 'show more', 'continue' etc. → use the page_token above if present.\n"
+                f"  If user says 'previous' or 'go back' → use start_at={max(0, _next - _limit * 2)} (no page_token).\n"
+                f"  For sprint issues page 2+: use jira_search with jql='sprint = {_sprint_id}' + page_token or start_at."
+            )
 
     user_msg = "\n\n".join(context_parts)
 
-    # Choose system prompt: master prompt always; browser supplement only for browser tasks.
+    # Always give the LLM full tool context — let it decide what's needed.
     system_prompt = MASTER_SYSTEM_PROMPT
-    if not _settings.disable_browser_tools and _needs_browser(task):
+    if not _settings.disable_browser_tools:
         system_prompt = MASTER_SYSTEM_PROMPT + BROWSER_SYSTEM_PROMPT
 
     start = time.time()
@@ -2580,7 +2532,7 @@ async def planner_node(state: AgentState) -> dict:
                     SystemMessage(content=system_prompt),
                     HumanMessage(
                         content=user_msg
-                        + "\n\nCRITICAL: Output ONLY valid JSON array. No markdown fences, no explanation. Every string value must use \\n for newlines, never bare newlines."
+                        + "\n\nImportant: Output ONLY valid JSON array. No markdown fences, no explanation. Every string value must use \\n for newlines, never bare newlines."
                     ),
                 ]
             )
@@ -2608,6 +2560,142 @@ async def planner_node(state: AgentState) -> dict:
                     ],
                 }
 
+    # Post-process plans: if a meeting-day get_events was produced but no ask_date
+    # step exists and the user's task did not explicitly request "today/asap/now",
+    # insert an `ask_date` step before the day-scoped get_events and template the
+    # get_events to use the collected date. This prevents silently assuming today.
+    try:
+      import re as _re_post
+      _has_ask = any(isinstance(s, dict) and s.get("id") == "ask_date" for s in plan)
+      # Find first get_events step
+      _ge_idx = None
+      for _i, _s in enumerate(plan):
+        if isinstance(_s, dict) and _s.get("tool") == "get_events":
+          _ge_idx = _i
+          break
+      if _ge_idx is not None and not _has_ask:
+        # Only inject ask_date when the user's task doesn't already imply today/asap
+        if not _re_post.search(r"\b(today|asap|now|right now|this (?:morning|afternoon|evening)|tonight)\b", task, _re_post.I):
+          _ge_step = plan[_ge_idx]
+          _params = _ge_step.get("params", {}) or {}
+          _time_min = str(_params.get("time_min", ""))
+          # If get_events was requested for a concrete date (e.g. 2026-04-24T00...) or <TODAY>,
+          # replace with templated date and insert ask_date before it.
+          if ("<TODAY>" in _time_min) or _re_post.match(r"\d{4}-\d{2}-\d{2}", _time_min):
+            ask_step = {
+              "id": "ask_date",
+              "tool": "ask_user",
+              "params": {"question": "Which date would you like to schedule the meeting? (e.g. today, tomorrow, April 25)"},
+              "success_criteria": "Date received",
+            }
+            # Update get_events to use the collected date
+            _params["time_min"] = "{{ask_date.answer}}T00:00:00Z"
+            _params["time_max"] = "{{ask_date.answer}}T23:59:59Z"
+            _ge_step["params"] = _params
+            plan.insert(_ge_idx, ask_step)
+    except Exception:
+      # If meeting post-processing fails, continue with original plan
+      pass
+
+    # Post-process worklog plans: ensure member disambiguation and date collection
+    try:
+      for _i in range(len(plan)):
+        _s = plan[_i]
+        if not isinstance(_s, dict):
+          continue
+        if _s.get("tool") != "jira_get_worklogs_by_date_range":
+          continue
+        _params = _s.get("params", {}) or {}
+        # If member_name present as a plain string (not template) and not a special token,
+        # insert jira_get_assignable_users + request_selection steps to let user pick the exact member.
+        mn = _params.get("member_name", "")
+        if isinstance(mn, str) and mn and not ("{{" in mn) and mn not in ("__me__", "__all__"):
+          # Create unique ids based on step index
+          fetch_id = f"fetch_members_{_i}"
+          sel_id = f"sel_member_{_i}"
+          proj_key_val = _params.get("project_key", "") or ""
+          fetch_step = {
+            "id": fetch_id,
+            "tool": "jira_get_assignable_users",
+            "params": {"project_key": proj_key_val},
+            "success_criteria": "Members fetched",
+          }
+          sel_step = {
+            "id": sel_id,
+            "tool": "request_selection",
+            "params": {"question": f"Which team member? (you said: {mn})","options": f"{{{{{fetch_id}}}}}", "multi_select": False},
+            "success_criteria": "Member selected",
+          }
+          # Replace member_name in the worklogs step with the selection reference
+          _params["member_name"] = f"{{{{{sel_id}.selected}}}}"
+          _s["params"] = _params
+          # Insert fetch and selection steps before the current worklog step
+          plan.insert(_i, fetch_step)
+          plan.insert(_i + 1, sel_step)
+          # Advance index to skip over newly inserted steps
+          # (loop will continue and handle further steps)
+        # Ensure date range is collected if start_date/end_date are missing or defaulted to today
+        sd = _params.get("start_date", "")
+        ed = _params.get("end_date", "")
+        if (not sd or not ed or (isinstance(sd, str) and sd.strip() == _today)):
+          # Insert a date-range collection form before this worklog step
+          collect_id = f"collect_dates_{_i}"
+          collect_step = {
+            "id": collect_id,
+            "tool": "request_form",
+            "params": {
+              "title": "Date Range",
+              "fields": [
+                {"id": "start_date", "label": "Start Date", "type": "text", "required": True, "placeholder": "YYYY-MM-DD"},
+                {"id": "end_date", "label": "End Date", "type": "text", "required": True, "placeholder": "YYYY-MM-DD"},
+              ],
+            },
+            "success_criteria": "Dates collected",
+          }
+          _params["start_date"] = f"{{{{{collect_id}.start_date}}}}"
+          _params["end_date"] = f"{{{{{collect_id}.end_date}}}}"
+          _s["params"] = _params
+          plan.insert(_i, collect_step)
+    except Exception:
+      # If worklog post-processing fails, prefer to continue with original plan
+      pass
+
+    # Post-process project-member additions: ensure role_id is numeric by
+    # fetching project roles and asking the user to pick if planner supplied
+    # a role name or otherwise non-numeric value.
+    try:
+      for _i in range(len(plan)):
+        _s = plan[_i]
+        if not isinstance(_s, dict):
+          continue
+        if _s.get("tool") != "jira_add_project_member":
+          continue
+        _params = _s.get("params", {}) or {}
+        role_val = _params.get("role_id", "")
+        proj_key_val = _params.get("project_key", "") or ""
+        # If role_id is present but not numeric, insert fetch+selection steps
+        if role_val and not str(role_val).strip().isdigit():
+          fetch_id = f"get_roles_{_i}"
+          sel_id = f"sel_role_{_i}"
+          fetch_step = {
+            "id": fetch_id,
+            "tool": "jira_get_project_roles",
+            "params": {"project_key": proj_key_val},
+            "success_criteria": "Roles fetched",
+          }
+          sel_step = {
+            "id": sel_id,
+            "tool": "request_selection",
+            "params": {"question": f"Which project role should the user have? (you said: {role_val})", "options": f"{{{{{fetch_id}}}}}", "multi_select": False},
+            "success_criteria": "Role selected",
+          }
+          _params["role_id"] = f"{{{{{sel_id}.selected}}}}"
+          _s["params"] = _params
+          plan.insert(_i, fetch_step)
+          plan.insert(_i + 1, sel_step)
+    except Exception:
+      pass
+
     logger.info("[PLANNER] Generated %d-step plan in %.0fms", len(plan), duration)
     for i, step in enumerate(plan):
         logger.info("  Step %d: [%s] %s", i, step.get("tool", "?"), step.get("description", ""))
@@ -2623,6 +2711,11 @@ async def planner_node(state: AgentState) -> dict:
     )
 
     cost = COST_PER_CALL["planner"]
+    # Build new flow_data: reset stale state but carry forward cross-turn context keys.
+    _prev_flow = state.get("flow_data", {})
+    _new_flow_data = {k: v for k, v in _prev_flow.items() if k in ("_last_list_result", "_last_action")}
+    _action_tools = [s.get("tool", "") for s in plan if s.get("tool") != "direct_response"]
+    _new_flow_data["_last_action"] = {"task": task[:120], "tools": _action_tools[:5]}
     return {
         "plan": plan,
         "current_step_index": 0,
@@ -2631,10 +2724,8 @@ async def planner_node(state: AgentState) -> dict:
         "replan_count": state.get("replan_count", 0),
         "steps_taken": state.get("steps_taken", 0),
         "estimated_cost": state.get("estimated_cost", 0.0) + cost,
-        # Reset per-task context so stale step results / flow_data from a previous
-        # plan don't bleed into this one (e.g. board_id skipping the selection step).
         "step_results": [],
-        "flow_data": {},
+        "flow_data": _new_flow_data,
         "messages": [
             AIMessage(content=f"Plan created with {len(plan)} steps. Starting execution...")
         ],

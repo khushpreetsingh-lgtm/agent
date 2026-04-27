@@ -499,7 +499,15 @@ async def _handle_message(ws: WebSocket, session_id: str, message: str) -> None:
                     if plan and node_name == "planner":
                         await _send(ws, {
                             "type": "plan_created",
-                            "steps": [{"id": s.get("id", ""), "description": s.get("description", "")} for s in plan],
+                            "steps": [
+                                {
+                                    "id": s.get("id", ""),
+                                    "label": s.get("description", "") or s.get("tool", "") or s.get("id", ""),
+                                    "description": s.get("description", "") or s.get("tool", "") or s.get("id", ""),
+                                    "tool": s.get("tool", ""),
+                                }
+                                for s in plan
+                            ],
                         })
                         task_store.log(task_id, f"Plan created with {len(plan)} steps", step="planner")
                         # Infer task type from the primary step's tool (first non-generic tool)

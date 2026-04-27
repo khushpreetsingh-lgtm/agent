@@ -1,11 +1,13 @@
-"""Verifier node — confirms browser steps succeeded before moving to the next.
+"""Verifier node — confirms each step succeeded before moving to the next.
 
-Only browser tools get verified (URL checks, page text, AI screenshot).
-MCP/API tools auto-pass on success and auto-fail on error — no retry logic.
-
-Priority order for browser steps (fastest → most expensive):
-  1. Deterministic checks (URL, element visible, text present) — FREE
-  2. AI screenshot verification — only if deterministic checks fail/unavailable
+Verification priority (fastest → most expensive):
+  MCP/API tools:
+    1. Fail on explicit error status from executor
+    2. Scan result text for embedded HTTP/API error messages
+    3. Deterministic criteria check (keyword matching against result)
+  Browser tools:
+    1. Deterministic checks (URL, element visible, text present) — FREE
+    2. AI screenshot verification — only if deterministic checks fail/unavailable
 """
 
 from __future__ import annotations
@@ -92,8 +94,9 @@ async def verifier_node(state: AgentState) -> dict:
         logger.info("[VERIFIER] Step '%s' auto-passed (human tool)", step_id)
         return {"current_step_index": idx + 1, "retry_count": 0, "status": "executing"}
 
-    # ── MCP / API tools: pass on success, fail on error — no retry ───────────
+    # ── MCP / API tools: verify result content — no blind auto-pass ─────────
     if tool_used not in _BROWSER_TOOLS:
+        # 1. Explicit failure from executor (exception raised or tool returned error status)
         if step_status in ("failed", "partial"):
             error_msg = last_result.get("error", "unknown error")
             logger.warning("[VERIFIER] MCP tool '%s' failed: %s", tool_used, error_msg[:120])
@@ -102,7 +105,72 @@ async def verifier_node(state: AgentState) -> dict:
                 "error": f"'{tool_used}' failed: {error_msg}",
                 "messages": [AIMessage(content=f"Step failed: {error_msg[:300]}")],
             }
-        logger.info("[VERIFIER] Step '%s' auto-passed (MCP tool)", step_id)
+
+        # 2. Detect silent errors embedded in the result text — some MCP tools
+        #    return HTTP error messages as plain text without raising an exception.
+        _raw_result_val = last_result.get("result", "")
+        _result_text = str(_raw_result_val).lower()
+        # Skip error-text scan for known-good structured Jira responses.
+        # A result that has an "issues" list (even empty) is a valid Jira response,
+        # not an error — field names like "errorMessages" in issue data would
+        # otherwise trigger false positives.
+        _skip_error_scan = False
+        try:
+            _rt_parsed = json.loads(_raw_result_val) if isinstance(_raw_result_val, str) else _raw_result_val
+            if isinstance(_rt_parsed, dict) and "issues" in _rt_parsed and isinstance(_rt_parsed["issues"], list):
+                _skip_error_scan = True
+        except Exception:
+            pass
+        _ERROR_INDICATORS = [
+            "error", "exception", "traceback", "failed", "failure",
+            "unauthori", "forbidden", "not found", "bad request",
+            "cannot", "unable to", "does not exist", "permission denied",
+            "status: 4", "status: 5",  # HTTP 4xx / 5xx in result text
+        ]
+        _FALSE_POSITIVES = [
+            "no error", "without error", "0 error", "no issues found",
+            "errorcount: 0", "errors: 0",
+        ]
+        if not _skip_error_scan and \
+                any(ind in _result_text for ind in _ERROR_INDICATORS) and \
+                not any(fp in _result_text for fp in _FALSE_POSITIVES):
+            raw_result = last_result.get("result", "")
+            try:
+                _parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+                _err_detail = (
+                    _parsed.get("error") or _parsed.get("message") or str(raw_result)
+                    if isinstance(_parsed, dict) else str(raw_result)
+                )
+            except Exception:
+                _err_detail = str(raw_result)
+            logger.warning(
+                "[VERIFIER] '%s' result contains error text: %s", tool_used, _err_detail[:200]
+            )
+            return {
+                "status": "failed",
+                "error": f"'{tool_used}' returned an error: {_err_detail[:300]}",
+                "messages": [AIMessage(content=f"Operation failed: {_err_detail[:300]}")],
+            }
+
+        # 3. Check success_criteria against result using the deterministic verifier
+        current_step = plan[idx] if idx < len(plan) else {}
+        criteria = current_step.get("success_criteria", "")
+        if criteria:
+            verified, reason = await _deterministic_verify(criteria, last_result, state)
+            if verified is False:
+                logger.warning("[VERIFIER] '%s' failed criteria check: %s", tool_used, reason)
+                return {
+                    "status": "failed",
+                    "error": f"'{tool_used}' did not meet success criteria: {reason}",
+                    "messages": [AIMessage(content=f"Step did not succeed: {reason}")],
+                }
+            if verified is True:
+                logger.info("[VERIFIER] Step '%s' passed (criteria: %s)", step_id, reason)
+            else:
+                logger.info("[VERIFIER] Step '%s' passed (result OK, criteria inconclusive)", step_id)
+        else:
+            logger.info("[VERIFIER] Step '%s' passed (result OK, no criteria)", step_id)
+
         return {"current_step_index": idx + 1, "retry_count": 0, "status": "executing"}
 
     # ── Browser tools: full verification pipeline ─────────────────────────────

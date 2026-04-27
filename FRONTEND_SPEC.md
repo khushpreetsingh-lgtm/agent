@@ -116,7 +116,61 @@ For multi-select (`multi_select: true`), allow multiple selections with checkbox
 
 ---
 
-### 6. `browser_frame` — Live browser screenshot
+### 6. `form` — Multi-field input form
+
+```json
+{
+  "type": "form",
+  "title": "New Meeting Details",
+  "description": "Your existing meetings on 2026-04-25:\n...\n\nSelect a free slot for your meeting.",
+  "fields": [
+    {"id": "title", "label": "Meeting Title", "type": "text", "required": true},
+    {
+      "id": "start_time",
+      "label": "Start Time",
+      "type": "select",
+      "required": true,
+      "options": [
+        {"value": "2026-04-25T03:30:00Z", "label": "9:00 AM IST"},
+        {"value": "2026-04-25T04:00:00Z", "label": "9:30 AM IST"},
+        {"value": "2026-04-25T04:30:00Z", "label": "10:00 AM IST"}
+      ]
+    },
+    {"id": "attendees", "label": "Attendees (emails)", "type": "text", "required": false}
+  ]
+}
+```
+
+**Render as:** A card with a submit button. Each field renders according to its `type`.
+
+**MEETING FORM — Duration Handling (IMPORTANT):**
+
+When the form contains a `start_time` field with `type: "select"` and its options are time slots (values are RFC3339 UTC strings), the UI must:
+
+1. Show a **Duration picker** alongside the start_time dropdown (options: 15 min, 30 min, 45 min, 1 hour, 1.5 hours, 2 hours).
+2. When the user submits, compute `end_time = start_time + selected_duration` (both as RFC3339 UTC strings).
+3. Include both `start_time` and `end_time` in the form response payload.
+
+**Response sent on submit:**
+```json
+{
+  "type": "form_response",
+  "values": {
+    "title": "Quarterly Review",
+    "start_time": "2026-04-25T04:00:00Z",
+    "end_time": "2026-04-25T05:00:00Z",
+    "attendees": "alice@example.com, bob@example.com"
+  }
+}
+```
+
+The slot labels display IST (e.g. "9:30 AM IST") but the values are UTC RFC3339 — always send the value, not the label.
+
+**IMPORTANT:** If `end_time` is not sent, the backend defaults to 1 hour after `start_time`.
+
+---
+
+### 7. `browser_frame` — Live browser screenshot
 ```json
 {
   "type": "browser_frame",

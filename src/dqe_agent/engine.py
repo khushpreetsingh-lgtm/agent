@@ -123,6 +123,20 @@ def _resolve_value(template: str, state: dict) -> str:
             else:
                 val = ""
                 break
+        # Sanitize numeric totals from external tools: negative totals (e.g. -1)
+        # often indicate an error or unknown count. Treat them as zero so
+        # user-facing messages don't show "-1 open issues".
+        try:
+            if isinstance(val, int) and val < 0:
+                val = 0
+            # Also handle stringified integers
+            if isinstance(val, str) and val.strip().lstrip("+-").isdigit():
+                n = int(val.strip())
+                if n < 0:
+                    val = 0
+        except Exception:
+            pass
+
         return str(val) if val is not None else ""
 
     return _TEMPLATE_RE.sub(_state_sub, template)
@@ -153,33 +167,75 @@ def _evaluate_condition(condition: str | None, state: dict) -> bool:
     if not condition:
         return True
 
-    # Parse simple conditions: "field.path == value"
-    match = re.match(r"(.+?)\s*==\s*(.+)", condition.strip())
-    if not match:
-        return True
+    cond = condition.strip()
 
-    left_expr = match.group(1).strip()
-    right_val = match.group(2).strip().lower()
+    # Support explicit equality conditions: "field.path == value"
+    match = re.match(r"(.+?)\s*==\s*(.+)", cond)
+    if match:
+        left_expr = match.group(1).strip()
+        right_val = match.group(2).strip().lower()
 
-    # Resolve left side
-    parts = left_expr.split(".")
-    val = state
-    for part in parts:
-        if isinstance(val, dict):
-            val = val.get(part)
-        elif hasattr(val, part):
-            val = getattr(val, part, None)
+        # Resolve left side
+        parts = left_expr.split(".")
+        val = state
+        for part in parts:
+            if isinstance(val, dict):
+                val = val.get(part)
+            elif hasattr(val, part):
+                val = getattr(val, part, None)
+            else:
+                val = None
+                break
+
+        # Compare
+        if right_val in ("true", "yes"):
+            return bool(val)
+        elif right_val in ("false", "no"):
+            return not bool(val)
         else:
-            val = None
-            break
+            return str(val).lower() == right_val
 
-    # Compare
-    if right_val in ("true", "yes"):
-        return bool(val)
-    elif right_val in ("false", "no"):
-        return not bool(val)
-    else:
-        return str(val).lower() == right_val
+    # Support conditions like "{{check_busy}} has events" or "check_busy has events"
+    m2 = re.match(r"^\s*\{?\{?\s*([^\}\s\}]+(?:\.[^\}\s\}]+)*)\s*\}?\}?\s+has\s+events\s*$", cond, re.IGNORECASE)
+    if m2:
+        ref = m2.group(1).strip()
+        # Resolve the referenced value from state (support nested paths)
+        parts = ref.split(".")
+        val = state
+        for part in parts:
+            if isinstance(val, dict):
+                val = val.get(part)
+            elif hasattr(val, part):
+                val = getattr(val, part, None)
+            else:
+                val = None
+                break
+
+        # If the tool returned a list of events, truthiness is straightforward
+        if isinstance(val, list):
+            return bool(val)
+
+        # If it's a dict with an 'items'/'events' key, check that
+        if isinstance(val, dict):
+            for key in ("items", "events", "results"):
+                if key in val and isinstance(val[key], list):
+                    return bool(val[key])
+            # Otherwise consider non-empty dict as truthy
+            return bool(val)
+
+        # Otherwise treat strings containing 'no events' / 'no events found' as empty
+        if isinstance(val, str):
+            low = val.strip().lower()
+            if not low:
+                return False
+            if "no events" in low or "no events found" in low:
+                return False
+            return True
+
+        return False
+
+    # Unknown condition format — default to True to avoid silently skipping intended steps
+    return True
 
 
 # ─────────────────────────────────────────────────────────

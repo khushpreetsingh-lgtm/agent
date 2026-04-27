@@ -29,12 +29,14 @@ logger = logging.getLogger(__name__)
 async def request_form(
     title: str,
     fields: list[dict],
+    description: str = "",
 ) -> str:
     """Interrupt execution and show the user a multi-field input form.
 
     Args:
-        title:  Heading shown above the form. e.g. "Create Jira Task"
-        fields: List of field definitions. Each field:
+        title:       Heading shown above the form. e.g. "Create Jira Task"
+        description: Optional context shown below the title (e.g. existing meetings, current state).
+        fields:      List of field definitions. Each field:
                   id          — key used in template refs ({{step_id.id}})
                   label       — human-readable field name
                   type        — text | textarea | select | multi_select | date | number
@@ -89,11 +91,15 @@ async def request_form(
             ]
         cleaned_fields.append(field)
 
-    result = interrupt({
+    payload: dict = {
         "type": "form",
         "title": title,
         "fields": cleaned_fields,
-    })
+    }
+    if description:
+        payload["description"] = description
+
+    result = interrupt(payload)
 
     if isinstance(result, dict):
         values = result
