@@ -2363,33 +2363,20 @@ async def _normalize_tool_params(
                     break
 
         # Step 4: name-fragment filter — "Which Tania do you mean?" → keep only Tanias
-        # Extract the queried name from patterns like "Which X do you mean?" / "Which X?"
-        # Then filter options to only entries whose label contains that fragment.
-        # 0 matches → show all (don't filter). 1+ matches → filter to subset.
-        # Single-match auto-select happens at call site (needs state).
+        # ONLY fires on explicit disambiguation questions ("do you mean" / "multiple X found").
+        # "Which board?" / "Which sprint?" are NOT disambiguation — never filter those.
         if _is_valid_options(params.get("options")):
             import re as _re_frag
             _q_for_filter = params.get("question", "")
             _name_frag: str | None = None
             for _pat in (
                 r"[Ww]hich\s+([A-Za-z][A-Za-z\s'-]{0,30}?)\s+do you mean",
-                r"[Ww]hich\s+([A-Za-z][A-Za-z\s'-]{0,30}?)\?",
                 r"multiple\s+([A-Za-z][A-Za-z\s'-]{1,30})s?\b",
             ):
                 _m2 = _re_frag.search(_pat, _q_for_filter)
                 if _m2:
                     _name_frag = _m2.group(1).strip()
                     break
-            # Skip name-fragment filtering for generic non-person words
-            _NON_PERSON_WORDS = {
-                "board", "project", "sprint", "issue", "ticket", "task", "bug",
-                "story", "epic", "team", "member", "user", "assignee", "role",
-                "priority", "status", "type", "label", "version", "component",
-                "option", "item", "one", "which", "that", "this",
-            }
-            if _name_frag and _name_frag.lower() in _NON_PERSON_WORDS:
-                _name_frag = None
-
             if _name_frag:
                 _frag_lower = _name_frag.lower()
                 _all_opts = params["options"]
