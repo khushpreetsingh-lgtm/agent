@@ -1096,6 +1096,50 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
         for _uk in _unresolved:
             resolved_params.pop(_uk, None)
 
+    # ── Global scalar coercion: flatten list/dict values for known scalar params ──
+    # Happens when a template like {{get_sprint}} resolves to the full sprint object.
+    def _extract_scalar(val: Any, field: str) -> Any:
+        """Extract a scalar from a list or dict, keyed by field name."""
+        if isinstance(val, list) and val:
+            val = val[0]
+        if isinstance(val, dict):
+            # Try field name itself first, then common aliases
+            for _k in (field, "id", "key", "value", "name"):
+                if val.get(_k) is not None:
+                    return val[_k]
+        return val
+
+    # IDs that must be strings, never lists/dicts
+    for _id_param in ("board_id", "sprint_id", "issue_key", "project_key"):
+        _v = resolved_params.get(_id_param)
+        if isinstance(_v, (list, dict)):
+            resolved_params[_id_param] = str(_extract_scalar(_v, _id_param) or "")
+
+    # Numeric params that must be ints
+    for _int_param in ("limit", "start_at"):
+        _v = resolved_params.get(_int_param)
+        if _v is not None and not isinstance(_v, int):
+            try:
+                resolved_params[_int_param] = int(str(_v).strip())
+            except (ValueError, TypeError):
+                pass
+
+    # Dates must be YYYY-MM-DD strings
+    if tool_name == "jira_get_worklogs_by_date_range":
+        for _dk in ("start_date", "end_date"):
+            _dv = resolved_params.get(_dk)
+            if isinstance(_dv, list) and _dv:
+                _dv = _dv[0]
+            if isinstance(_dv, dict):
+                _extracted_d = _dv.get(_dk) or _dv.get("startDate") or _dv.get("endDate") or _dv.get("start_date") or _dv.get("end_date")
+                if _extracted_d:
+                    _dv = _extracted_d
+            if isinstance(_dv, str) and "T" in _dv:
+                _dv = _dv[:10]
+            if isinstance(_dv, str):
+                resolved_params[_dk] = _dv
+                logger.info("[EXECUTOR] worklogs %s coerced → %r", _dk, _dv)
+
     logger.info(
         "[EXECUTOR] Resolved params for '%s': %s",
         step_id,
