@@ -62,15 +62,6 @@ def get_all_agents() -> list[AgentConfig]:
     return list(_AGENT_REGISTRY.values())
 
 
-def build_domain_index() -> dict[str, str]:
-    """Build {keyword: agent_id} lookup from all registered agents."""
-    idx: dict[str, str] = {}
-    for agent in _AGENT_REGISTRY.values():
-        for domain in (agent.domains or []):
-            idx[domain.lower()] = agent.agent_id
-    return idx
-
-
 def clear_registry() -> None:
     """Remove all registered agents (useful for tests)."""
     _AGENT_REGISTRY.clear()
