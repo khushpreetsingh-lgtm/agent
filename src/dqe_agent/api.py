@@ -287,14 +287,30 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                 content = msg.get("content", "").strip()
                 if content:
                     if session_id in _awaiting_input:
-                        await human_q.put(content)
+                        # User typed a new message while a selection/form/review was pending.
+                        # Treat as a new command: cancel current task and restart.
+                        # Proper picks come via selection_response/form_response/edit_response,
+                        # not via chat — so a chat message here is always a new intent.
+                        logger.info(
+                            "[%s] chat received while awaiting input — cancelling current task, restarting with: %r",
+                            session_id, content[:80],
+                        )
+                        _awaiting_input.discard(session_id)
+                        _cancel_session_task(session_id)
+                        # Drain the queue so stale state doesn't leak into the new task
+                        while not human_q.empty():
+                            try:
+                                human_q.get_nowait()
+                            except Exception:
+                                break
+                        await _send(ws, {"type": "agent_text", "content": "Starting new request..."})
                     else:
                         _cancel_session_task(session_id)
-                        task = asyncio.create_task(
-                            _run_with_browser(session_bm, session_id,
-                                              _handle_message(ws, session_id, content))
-                        )
-                        _session_tasks[session_id] = task
+                    task = asyncio.create_task(
+                        _run_with_browser(session_bm, session_id,
+                                          _handle_message(ws, session_id, content))
+                    )
+                    _session_tasks[session_id] = task
 
             elif mtype == "run_task":
                 # Alias — same unified PEV handler
