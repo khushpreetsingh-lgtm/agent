@@ -464,26 +464,6 @@ agents = classify_domains(message, index)
 print(agents)  # ['jira', 'calendar']
 ```
 
-## Files Modified
-
-| File | Change |
-|------|--------|
-| `src/dqe_agent/agents/__init__.py` | AgentConfig ABC, registry, discovery |
-| `src/dqe_agent/agents/jira_agent.py` | JiraAgent definition |
-| `src/dqe_agent/agents/calendar_agent.py` | CalendarAgent definition |
-| `src/dqe_agent/agents/email_agent.py` | EmailAgent definition |
-| `src/dqe_agent/agents/browser_agent.py` | BrowserAgent definition |
-| `src/dqe_agent/state.py` | Added `agent_id`, `orchestrator_tasks`, `sub_results` |
-| `src/dqe_agent/agent/loop.py` | Added `tool_filter` param to `build_pev_graph()` |
-| `src/dqe_agent/agent/planner.py` | Added `_tool_filter` param, auto-load from `agent_id` |
-| `src/dqe_agent/agent/executor.py` | Added `_tool_filter` param |
-| `src/dqe_agent/agent/orchestrator.py` | Orchestrator node, aggregator, ProactiveMonitor |
-| `src/dqe_agent/agent/master.py` | Use `build_orchestrator_graph()` |
-| `src/dqe_agent/api.py` | Call `discover_agents()`, wire ProactiveMonitor |
-| `tests/test_agents.py` | 10 tests for registry + tool filtering |
-| `tests/test_orchestrator.py` | 7 tests for classification + proactive monitor |
-
-## Zero Breaking Changes
 
 Backward compatible:
 - Existing single-agent workflows work unchanged
