@@ -3446,7 +3446,7 @@ async def _normalize_tool_params(
 
                 # Drop fields unsupported by this project (from jira_get_project_fields)
                 _upd_supports = None
-                for _sr2 in step_results:
+                for _sr2 in results_by_id.values():
                     if not isinstance(_sr2, dict) or _sr2.get("tool") != "jira_get_project_fields":
                         continue
                     try:
