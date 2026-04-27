@@ -77,9 +77,25 @@ def clear_registry() -> None:
 
 
 def discover_agents() -> None:
-    """Auto-import every non-private module in ``dqe_agent.agents``."""
+    """Auto-import every non-private module in ``dqe_agent.agents``.
+
+    Imports modules and discovers AgentConfig subclasses, registering them.
+    Safe to call multiple times — uses register_agent which is idempotent.
+    """
+    import inspect
+
     package = importlib.import_module("dqe_agent.agents")
     for _, name, _ in pkgutil.iter_modules(package.__path__):
         if not name.startswith("_"):
-            importlib.import_module(f"dqe_agent.agents.{name}")
+            mod = importlib.import_module(f"dqe_agent.agents.{name}")
+            # Scan module for AgentConfig subclasses and register them
+            for item_name in dir(mod):
+                item = getattr(mod, item_name)
+                if (
+                    inspect.isclass(item)
+                    and issubclass(item, AgentConfig)
+                    and item is not AgentConfig
+                    and not item_name.startswith("_")
+                ):
+                    register_agent(item())
     logger.info("Discovered agents: %s", list(_AGENT_REGISTRY.keys()))

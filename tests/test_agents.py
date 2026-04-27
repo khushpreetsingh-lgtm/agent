@@ -58,3 +58,24 @@ def test_agent_state_has_new_fields():
     assert "agent_id" in annotations
     assert "orchestrator_tasks" in annotations
     assert "sub_results" in annotations
+
+
+def test_builtin_agents_discovered():
+    discover_agents()
+    agents = list_agents()
+    for aid in ["jira", "calendar", "email", "browser", "people"]:
+        assert aid in agents, f"Built-in agent '{aid}' not found after discover_agents()"
+
+
+def test_jira_agent_domains():
+    discover_agents()
+    agent = get_agent("jira")
+    assert "jira" in agent.domains
+    assert "sprint" in agent.domains
+    assert "ticket" in agent.domains
+
+
+def test_browser_agent_is_fallback():
+    discover_agents()
+    agent = get_agent("browser")
+    assert agent.tools is None  # browser agent = all tools (catch-all fallback)
