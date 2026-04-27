@@ -493,7 +493,18 @@ Use MCP tools from AVAILABLE_MCP_TOOLS. Do NOT use browser_* tools for Jira.
 Verifier note: Jira steps are verified by response content only — no screenshot.
 Use plain success_criteria like "Issue created successfully" or "Projects listed".
 
-── CREATE ISSUE — Required step order (ALWAYS follow this — no exceptions) ──
+── CREATE ISSUE — MANDATORY STEP ORDER (NEVER skip or reorder) ──
+
+  MANDATORY ORDER for every create-issue plan:
+  1. sel_proj (request_selection) — ONLY if project not stated; skip if project is known
+  2. get_fields (jira_get_project_fields) — ALWAYS, no exceptions, BEFORE get_pri/fetch_users/form
+  3. get_pri (jira_get_priorities) — AFTER get_fields
+  4. fetch_users (jira_get_assignable_users) — AFTER get_fields
+  5. collect_info (request_form) — AFTER get_fields, using supports.* to decide which fields
+  6. gen_desc → edit_desc → create_issue → upd_issue → attach (if file) → get_created → done
+
+  NEVER output a create-issue plan without get_fields as step 1 (or step 2 if sel_proj needed).
+  NEVER call jira_get_priorities or request_form before jira_get_project_fields completes.
 
 ⚑ KEY RULE — resolve the REAL project key from JIRA_PROJECTS_PREFETCHED BEFORE fetching
   assignees or creating anything. NEVER use <<FIRST_PROJECT_KEY>>. NEVER guess a key from
