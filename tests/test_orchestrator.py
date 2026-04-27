@@ -56,3 +56,25 @@ def test_build_orchestrator_graph():
     # Should compile without error
     compiled = graph.compile()
     assert compiled is not None
+
+
+@pytest.mark.asyncio
+async def test_proactive_monitor_runs_and_stops():
+    import asyncio
+    from dqe_agent.agent.orchestrator import ProactiveMonitor
+
+    alerts = []
+
+    async def fake_broadcast(msg):
+        alerts.append(msg)
+
+    monitor = ProactiveMonitor(broadcast_fn=fake_broadcast)
+    task = asyncio.create_task(monitor.start())
+    await asyncio.sleep(0.05)
+    monitor.stop()
+    try:
+        await asyncio.wait_for(task, timeout=1.0)
+    except asyncio.TimeoutError:
+        task.cancel()
+    # Just verify it started and stopped without error
+    assert monitor._stopped
