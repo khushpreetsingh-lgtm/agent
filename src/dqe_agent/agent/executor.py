@@ -1587,7 +1587,8 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
             elif _total_is_real:
                 _has_more = _next_start < _total
             else:
-                _has_more = (_shown >= _limit and _shown > 0 and _start_at == 0)
+                # total=-1 (unknown): no nextPageToken means Jira has no more pages
+                _has_more = False
             _pagination_summary = {
                 "tool": tool_name,
                 "query": params.get("jql") or params.get("sprint_id") or "",
