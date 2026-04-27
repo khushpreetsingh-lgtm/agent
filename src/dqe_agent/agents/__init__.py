@@ -13,8 +13,7 @@ import importlib
 import logging
 import pkgutil
 from abc import ABC
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +35,7 @@ class AgentConfig(ABC):
     """
     agent_id: str
     description: str = ""
-    domains: list[str] = field(default_factory=list)
+    domains: list[str] | None = None
     tools: list[str] | None = None  # None = all tools
     system_prompt: str = ""
     proactive: ProactiveConfig | None = None
@@ -70,6 +69,11 @@ def build_domain_index() -> dict[str, str]:
         for domain in (agent.domains or []):
             idx[domain.lower()] = agent.agent_id
     return idx
+
+
+def clear_registry() -> None:
+    """Remove all registered agents (useful for tests)."""
+    _AGENT_REGISTRY.clear()
 
 
 def discover_agents() -> None:

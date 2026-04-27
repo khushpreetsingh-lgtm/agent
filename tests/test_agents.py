@@ -1,8 +1,16 @@
 import pytest
 from dqe_agent.agents import (
     AgentConfig, ProactiveConfig, register_agent,
-    get_agent, list_agents, discover_agents, build_domain_index,
+    get_agent, list_agents, discover_agents, build_domain_index, clear_registry,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_agent_registry():
+    from dqe_agent.agents import clear_registry
+    clear_registry()
+    yield
+    clear_registry()
 
 
 class _TestAgent(AgentConfig):

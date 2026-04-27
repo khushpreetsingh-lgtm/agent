@@ -141,6 +141,9 @@ async def lifespan(app: FastAPI):
     from dqe_agent.flows import discover_flows
     discover_flows()
 
+    from dqe_agent.agents import discover_agents
+    discover_agents()
+
     # Log configured sites (from settings.sites — no Python files needed)
     from dqe_agent.config import settings as _s
     logger.info("Sites configured: %s", list(_s.sites.keys()))
