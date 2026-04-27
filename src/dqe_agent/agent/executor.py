@@ -782,6 +782,16 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
         else:
             response_msg = raw_msg
 
+        # --- Append pagination notice if more results available ---
+        _last_list = flow_data.get("_last_list_result")
+        if _last_list and _last_list.get("has_more"):
+            _shown = _last_list.get("shown", 0)
+            _total = _last_list.get("total")
+            if _total and _total > _shown:
+                response_msg += f"\n\n💡 Showing {_shown} of {_total} results. Type 'show more' to see the next page."
+            elif _shown > 0:
+                response_msg += f"\n\n💡 Showing first {_shown} results. Type 'show more' to see the next page."
+
         return {
             "step_results": state.get("step_results", [])
             + [
