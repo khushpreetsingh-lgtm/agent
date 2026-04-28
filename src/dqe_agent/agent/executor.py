@@ -3493,8 +3493,8 @@ async def _normalize_tool_params(
                     if _flat is not None:
                         _fv = str(_flat).strip()
 
-                # Drop empty values (user left field blank)
-                if isinstance(_fv, str) and not _fv.strip():
+                # Drop empty/None values (user left field blank or field not in form)
+                if _fv is None or (isinstance(_fv, str) and not _fv.strip()):
                     logger.info("[EXECUTOR] jira_update_issue: skipping empty field %r", _fk)
                     continue
 
@@ -3885,10 +3885,15 @@ def _resolve_ref_to_object(ref: str, flow_data: dict, results_by_id: dict) -> An
                     if isinstance(_nested, dict) and _nested.get(p) is not None:
                         obj = _nested[p]
                         continue
-                    # Key truly not found — try to extract a list from the dict
-                    # (e.g. template says .boards but data is under .values / ._items)
-                    extracted = _extract_items_from_response(obj)
-                    return extracted if extracted else None
+                    # Key truly not found — only fall back to list extraction when
+                    # the dict looks like a Jira list response (has wrapper keys like
+                    # "values"/"boards"/"issues"). For flat form/selection results
+                    # (summary, assignee, priority, …) a missing key means None.
+                    _list_keys = {"values", "boards", "sprints", "issues", "projects", "_items", "_list", "items", "data", "results"}
+                    if _list_keys & set(obj.keys()):
+                        extracted = _extract_items_from_response(obj)
+                        return extracted if extracted else None
+                    return None
                 # Jira Cloud returns total=-1 (unknown) — substitute real count from issues array
                 if p == "total" and obj == -1 and isinstance(root, dict) and "issues" in root:
                     obj = len(root["issues"])
