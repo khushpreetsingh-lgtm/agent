@@ -2453,20 +2453,28 @@ async def _normalize_tool_params(
                     break
 
         # Step 4: name-fragment filter — "Which Tania do you mean?" → keep only Tanias
-        # ONLY fires on explicit disambiguation questions ("do you mean" / "multiple X found").
-        # "Which board?" / "Which sprint?" are NOT disambiguation — never filter those.
+        # ONLY fires on explicit person-disambiguation questions ("do you mean").
+        # Generic Jira nouns (project, sprint, board, issue, task, …) are never person names.
+        _GENERIC_JIRA_NOUNS = {
+            "project", "sprint", "board", "issue", "task", "bug", "story", "epic",
+            "ticket", "component", "version", "release", "label", "priority",
+            "assignee", "reporter", "status", "type", "user", "member", "team",
+            "item", "request", "feature", "subtask", "sub", "option", "selection",
+        }
         if _is_valid_options(params.get("options")):
             import re as _re_frag
             _q_for_filter = params.get("question", "")
             _name_frag: str | None = None
             for _pat in (
                 r"[Ww]hich\s+([A-Za-z][A-Za-z\s'-]{0,30}?)\s+do you mean",
-                r"multiple\s+([A-Za-z][A-Za-z\s'-]{1,30})s?\b",
             ):
                 _m2 = _re_frag.search(_pat, _q_for_filter)
                 if _m2:
                     _name_frag = _m2.group(1).strip()
                     break
+            # Discard if extracted fragment is a generic noun, not a person name
+            if _name_frag and _name_frag.lower().rstrip("s") in _GENERIC_JIRA_NOUNS:
+                _name_frag = None
             if _name_frag:
                 _frag_lower = _name_frag.lower()
                 _all_opts = params["options"]

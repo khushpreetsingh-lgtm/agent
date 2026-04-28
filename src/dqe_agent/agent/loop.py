@@ -29,8 +29,11 @@ def route_after_verify(state: AgentState) -> str:
     plan = state.get("plan", [])
     idx = state.get("current_step_index", 0)
 
-    if status == "failed":
+    if status in ("failed",):
         return "end"
+
+    if status == "complete":
+        return "done"
 
     if status == "planning":
         return "replan"
