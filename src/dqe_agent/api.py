@@ -199,7 +199,6 @@ async def lifespan(app: FastAPI):
     monitor = ProactiveMonitor(broadcast_fn=_broadcast_alert)
     _proactive_monitor_task = asyncio.create_task(monitor.start())
     logger.info("ProactiveMonitor started")
-
     yield
 
     # Stop proactive monitor
@@ -237,6 +236,13 @@ app.add_middleware(
 )
 
 _DIST_DIR = Path(__file__).resolve().parent.parent.parent / "dist"
+
+
+# When a prebuilt frontend exists in `dist/`, mount it so the same server
+# can serve both the API and the web UI (useful for single-host deployments).
+if _DIST_DIR.exists():
+    logger.info("Mounting frontend static files from %s", _DIST_DIR)
+    app.mount("/", StaticFiles(directory=str(_DIST_DIR), html=True), name="frontend")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
