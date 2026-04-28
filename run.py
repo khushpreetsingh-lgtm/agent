@@ -28,6 +28,16 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("playwright").setLevel(logging.WARNING)
 logging.getLogger("aioice").setLevel(logging.ERROR)   # suppress link-local bind noise
 
+from pathlib import Path
+
+# Ensure local `src/` is on sys.path when the package isn't installed.
+# This allows `python run.py` to work in build environments (e.g. Netlify)
+# where `pip install -e .` wasn't run and `dqe_agent` isn't an installed package.
+repo_root = Path(__file__).resolve().parent
+src_path = repo_root / "src"
+if src_path.exists():
+    sys.path.insert(0, str(src_path))
+
 import uvicorn  # noqa: E402 (must be imported after policy is set)
 
 if __name__ == "__main__":
