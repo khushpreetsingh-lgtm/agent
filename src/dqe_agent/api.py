@@ -303,6 +303,9 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                                 human_q.get_nowait()
                             except Exception:
                                 break
+                        # Clear LangGraph checkpoint so new task doesn't see stale flow_data
+                        if master_agent:
+                            await master_agent.reset(session_id)
                         await _send(ws, {"type": "agent_text", "content": "Starting new request..."})
                     else:
                         _cancel_session_task(session_id)
