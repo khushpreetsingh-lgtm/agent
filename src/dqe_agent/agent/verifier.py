@@ -119,13 +119,22 @@ async def verifier_node(state: AgentState) -> dict:
         # A result that has an "issues" list (even empty) is a valid Jira response,
         # not an error — field names like "errorMessages" in issue data would
         # otherwise trigger false positives.
-        _skip_error_scan = False
-        try:
-            _rt_parsed = json.loads(_raw_result_val) if isinstance(_raw_result_val, str) else _raw_result_val
-            if isinstance(_rt_parsed, dict) and "issues" in _rt_parsed and isinstance(_rt_parsed["issues"], list):
-                _skip_error_scan = True
-        except Exception:
-            pass
+        # Tools whose results are always user-facing text — never scan for errors
+        _NO_ERROR_SCAN_TOOLS = {
+            "llm_draft_content", "request_edit", "direct_response",
+            "ask_user", "request_form", "request_selection", "human_review",
+        }
+        _skip_error_scan = tool_used in _NO_ERROR_SCAN_TOOLS
+        if not _skip_error_scan:
+            try:
+                _rt_parsed = json.loads(_raw_result_val) if isinstance(_raw_result_val, str) else _raw_result_val
+                if isinstance(_rt_parsed, dict) and "issues" in _rt_parsed and isinstance(_rt_parsed["issues"], list):
+                    _skip_error_scan = True
+                # Skip scan when result is a content-wrapper dict (llm output, edit result, etc.)
+                elif isinstance(_rt_parsed, dict) and "content" in _rt_parsed and len(_rt_parsed) <= 3:
+                    _skip_error_scan = True
+            except Exception:
+                pass
         _ERROR_INDICATORS = [
             "error", "exception", "traceback", "failed", "failure",
             "unauthori", "forbidden", "not found", "bad request",
