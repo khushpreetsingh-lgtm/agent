@@ -75,7 +75,7 @@ async def llm_draft_content(
         content_type,
         "Write professional content about: {topic}. Context: {context}. Be concise.",
     )
-    prompt = prompt_template.format(topic=topic or "unspecified", context=context or "none")
+    prompt = prompt_template.format(topic=topic or context or "unspecified", context=context or topic or "none")
 
     try:
         llm = get_executor_llm()
