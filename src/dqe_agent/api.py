@@ -47,9 +47,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
@@ -199,6 +199,7 @@ async def lifespan(app: FastAPI):
     monitor = ProactiveMonitor(broadcast_fn=_broadcast_alert)
     _proactive_monitor_task = asyncio.create_task(monitor.start())
     logger.info("ProactiveMonitor started")
+
     yield
 
     # Stop proactive monitor
@@ -236,13 +237,6 @@ app.add_middleware(
 )
 
 _DIST_DIR = Path(__file__).resolve().parent.parent.parent / "dist"
-
-
-# When a prebuilt frontend exists in `dist/`, mount it so the same server
-# can serve both the API and the web UI (useful for single-host deployments).
-if _DIST_DIR.exists():
-    logger.info("Mounting frontend static files from %s", _DIST_DIR)
-    app.mount("/", StaticFiles(directory=str(_DIST_DIR), html=True), name="frontend")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -761,6 +755,47 @@ async def root():
     if index.exists():
         return FileResponse(index)
     return {"service": "DQE Agent API", "version": "3.0.0", "docs": "/docs"}
+
+
+_UPLOAD_DIR = Path("uploads")
+_ALLOWED_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+    ".pdf", ".txt", ".csv", ".xlsx", ".xls", ".docx", ".doc",
+    ".zip", ".json", ".xml", ".log",
+}
+_MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+@app.post("/api/v1/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """Accept a file upload and save it to a temp directory.
+
+    Returns {"file_path": "<absolute path>"} which the form passes to
+    jira_add_attachment as the file_path parameter.
+    """
+    suffix = Path(file.filename or "file").suffix.lower()
+    if suffix not in _ALLOWED_EXTENSIONS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"File type '{suffix}' not allowed."},
+        )
+
+    _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    safe_name = f"{uuid.uuid4().hex}_{Path(file.filename or 'file').name}"
+    dest = _UPLOAD_DIR / safe_name
+
+    contents = await file.read()
+    if len(contents) > _MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            status_code=413,
+            content={"error": "File too large (max 20 MB)."},
+        )
+
+    dest.write_bytes(contents)
+    abs_path = str(dest.resolve())
+    logger.info("[UPLOAD] saved %s → %s (%d bytes)", file.filename, abs_path, len(contents))
+    return {"file_path": abs_path, "filename": file.filename, "size": len(contents)}
 
 
 @app.get("/health")
