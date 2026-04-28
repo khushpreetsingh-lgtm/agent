@@ -1716,6 +1716,15 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
                         for _hk in ("key", "id", "summary", "url", "status"):
                             if _nested.get(_hk) and _hk not in parsed:
                                 parsed[_hk] = _nested[_hk]
+                    # Add a clickable browse URL (REST URL → /browse/KEY)
+                    if parsed.get("key") and "browse_url" not in parsed:
+                        try:
+                            from dqe_agent.config import settings as _cs
+                            _base = str(_cs.jira_url).rstrip("/")
+                            parsed["browse_url"] = f"{_base}/browse/{parsed['key']}"
+                            parsed["url"] = parsed["browse_url"]  # override REST url
+                        except Exception:
+                            pass
                     # Persist the enriched dict back so results_by_id is also up-to-date
                     result = json.dumps(parsed, default=str)
                     step_result["result"] = result

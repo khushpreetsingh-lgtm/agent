@@ -577,7 +577,7 @@ CASE A — project IS stated in the task (e.g. "create issue in FLAG", "create b
   <INCLUDE attachment step ONLY if user provided a file path in collect_info.attachment>,
   {"id":"attach","tool":"jira_add_attachment","params":{"issue_key":"{{create_issue.key}}","file_path":"{{collect_info.attachment}}"},"success_criteria":"Attachment uploaded"},
   {"id":"get_created","tool":"jira_get_issue","params":{"issue_key":"{{create_issue.key}}"},"success_criteria":"Issue details fetched"},
-  {"id":"done","tool":"direct_response","params":{"message":"Issue created successfully!\n\nKey: {{create_issue.key}}\nSummary: {{collect_info.summary}}\nType: {{collect_info.issue_type}}\nPriority: {{collect_info.priority}}\nAssignee: {{collect_info.assignee}}\n\nFull details:\n{{get_created}}"}}
+  {"id":"done","tool":"direct_response","params":{"message":"✅ Issue created successfully!\n\n**Key:** {{create_issue.key}}\n**Summary:** {{collect_info.summary}}\n**Type:** {{collect_info.issue_type}}\n**Assignee:** {{collect_info.assignee}}\n\n🔗 {{create_issue.url}}"}}
 
 CASE B — project NOT stated in the task:
   First show project selection, then fetch fields+assignees for the CHOSEN project.
@@ -610,7 +610,7 @@ CASE B — project NOT stated in the task:
   <INCLUDE attachment step ONLY if user provided a file path in collect_info.attachment>,
   {"id":"attach","tool":"jira_add_attachment","params":{"issue_key":"{{create_issue.key}}","file_path":"{{collect_info.attachment}}"},"success_criteria":"Attachment uploaded"},
   {"id":"get_created","tool":"jira_get_issue","params":{"issue_key":"{{create_issue.key}}"},"success_criteria":"Issue details fetched"},
-  {"id":"done","tool":"direct_response","params":{"message":"Issue created successfully!\n\nKey: {{create_issue.key}}\nSummary: {{collect_info.summary}}\nType: {{collect_info.issue_type}}\nPriority: {{collect_info.priority}}\nAssignee: {{collect_info.assignee}}\n\nFull details:\n{{get_created}}"}}
+  {"id":"done","tool":"direct_response","params":{"message":"✅ Issue created successfully!\n\n**Key:** {{create_issue.key}}\n**Summary:** {{collect_info.summary}}\n**Type:** {{collect_info.issue_type}}\n**Assignee:** {{collect_info.assignee}}\n\n🔗 {{get_created.url}}"}}
 
 ⚑ EVERY field dict MUST include an "id" key.
 ⚑ summary: pre-fill as default when user gave a clear title; only require when truly absent.
