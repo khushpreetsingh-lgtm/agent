@@ -950,6 +950,11 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
                         "[EXECUTOR] Pre-resolved request_selection options: %d items from step '%s'",
                         len(_resolved_sel_opts), _ref_step,
                     )
+                    if not _resolved_sel_opts:
+                        logger.warning(
+                            "[EXECUTOR] Pre-resolve got 0 options from step '%s' — raw result: %s",
+                            _ref_step, str(_raw)[:400],
+                        )
 
             # ── Priority 2: scan recent results only when exact step was never run ──
             # If the referenced step ran but failed, do NOT substitute data from a
@@ -1227,6 +1232,41 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
             "messages": [AIMessage(content=_msg)],
             "flow_data": dict(state.get("flow_data", {})),
         }
+
+    # ── Empty options: abort with helpful message instead of broken UI ───────────
+    if tool_name == "request_selection":
+        _sel_opts = resolved_params.get("options", [])
+        if isinstance(_sel_opts, list) and len(_sel_opts) == 0:
+            # Figure out what kind of thing was expected from the question text
+            _q_text = resolved_params.get("question", "")
+            _what = "items"
+            for _kw, _label in (
+                ("board", "boards"), ("sprint", "sprints"), ("project", "projects"),
+                ("issue", "issues"), ("user", "users"), ("assignee", "users"),
+                ("member", "members"), ("calendar", "calendars"),
+            ):
+                if _kw in _q_text.lower():
+                    _what = _label
+                    break
+            _empty_msg = f"No {_what} found. Please check your Jira configuration or try a different project."
+            logger.warning("[EXECUTOR] request_selection: 0 options — aborting: %s", _empty_msg)
+            return {
+                "step_results": state.get("step_results", []) + [{
+                    "step_id": step_id,
+                    "step_index": idx,
+                    "tool": "direct_response",
+                    "status": "success",
+                    "result": _empty_msg,
+                    "error": "",
+                    "duration_ms": 0,
+                    "retries": 0,
+                }],
+                "steps_taken": steps_taken + 1,
+                "estimated_cost": cost,
+                "status": "complete",
+                "messages": [AIMessage(content=_empty_msg)],
+                "flow_data": dict(state.get("flow_data", {})),
+            }
 
     # ── Auto-select: skip interrupt when request_selection has exactly 1 option ──
     if tool_name == "request_selection":
