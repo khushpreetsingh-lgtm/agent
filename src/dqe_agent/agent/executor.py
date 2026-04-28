@@ -369,7 +369,7 @@ def _no_results_sentence(prefix: str) -> str:
     return f"No {subject.lower()} found."
 
 
-def _format_result_for_display(raw: str) -> str:
+def _format_result_for_display(raw: str, label_hint: str | None = None) -> str:
     """Convert a raw MCP result string into a human-readable message.
 
     Handles:
@@ -471,7 +471,10 @@ def _format_result_for_display(raw: str) -> str:
             if _itn:
                 _type_counts[_itn.lower()] = _type_counts.get(_itn.lower(), 0) + 1
         _dominant = max(_type_counts, key=_type_counts.get) if _type_counts else None
-        if _dominant and len(_type_counts) == 1:
+        if label_hint:
+            _label = label_hint.lower().rstrip("s")
+            _label_pl = _label + "s" if not _label.endswith("s") else _label
+        elif _dominant and len(_type_counts) == 1:
             _label = _dominant  # e.g. "task", "bug", "story"
             _label_pl = _label + "s" if not _label.endswith("s") else _label
         else:
@@ -689,18 +692,29 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
         # Resolve any {{step_id.field}} templates in the message
         step_results = state.get("step_results", [])
         results_by_id = {r.get("step_id", ""): r for r in step_results if isinstance(r, dict)}
+
+        # Extract issuetype hint from JQL in last list result
+        _jql_label_hint: str | None = None
+        _last_lr = flow_data.get("_last_list_result", {})
+        _jql_str = _last_lr.get("query", "") if isinstance(_last_lr, dict) else ""
+        if _jql_str:
+            import re as _re_jql
+            _m_it = _re_jql.search(r"issuetype\s*=\s*[\"']?(\w+)[\"']?", _jql_str, _re_jql.IGNORECASE)
+            if _m_it:
+                _jql_label_hint = _m_it.group(1)
+
         if "{{" in raw_msg:
             response_msg = _resolve_template(raw_msg, flow_data, results_by_id)
             # Format any embedded JSON result into a human-readable string
             if response_msg and response_msg.strip().startswith(("[", "{")):
-                response_msg = _format_result_for_display(response_msg)
+                response_msg = _format_result_for_display(response_msg, label_hint=_jql_label_hint)
             elif response_msg:
                 # Fast path: if the whole resolved message is a Jira issues payload
                 # (deeply nested — the regex approach can't handle it), format directly.
                 try:
                     _quick = json.loads(response_msg.strip()) if response_msg.strip().startswith(("{", "[")) else None
                     if isinstance(_quick, dict) and "issues" in _quick:
-                        response_msg = _format_result_for_display(response_msg.strip())
+                        response_msg = _format_result_for_display(response_msg.strip(), label_hint=_jql_label_hint)
                         _quick = None  # handled
                 except Exception:
                     pass
@@ -726,7 +740,7 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
                         actual = len(issues) if (raw_total is None or raw_total < 0) else raw_total
                         return str(actual)
 
-                    formatted = _format_result_for_display(blob_str)
+                    formatted = _format_result_for_display(blob_str, label_hint=_jql_label_hint)
                     if formatted == "No issues found.":
                         return "none"
                     return formatted
@@ -787,7 +801,7 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
                     _m = _re_trail.search(r"(\{[\s\S]*\}|\[[\s\S]*\])\s*$", response_msg)
                     if _m:
                         prefix = response_msg[: _m.start()].rstrip().rstrip(":").rstrip()
-                        formatted = _format_result_for_display(_m.group(1))
+                        formatted = _format_result_for_display(_m.group(1), label_hint=_jql_label_hint)
                         if formatted == "No issues found.":
                             if prefix and "\n" in prefix:
                                 response_msg = prefix
