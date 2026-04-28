@@ -1575,6 +1575,32 @@ async def executor_node(state: AgentState, _tool_filter: list[str] | None = None
                     except Exception as _bge:
                         logger.warning("[EXECUTOR] busy-slot gate error (skipping): %s", _bge)
 
+        # ── Skip optional tools when required param is empty ─────────────────
+        if tool_name == "jira_add_attachment":
+            _fp = resolved_params.get("file_path", "")
+            if not _fp or not str(_fp).strip():
+                logger.info("[EXECUTOR] jira_add_attachment: file_path empty — skipping step")
+                merged_flow = dict(flow_data)
+                merged_flow[step_id] = {"skipped": True}
+                return {
+                    "step_results": state.get("step_results", []) + [{
+                        "step_id": step_id,
+                        "step_index": idx,
+                        "tool": tool_name,
+                        "status": "skipped",
+                        "result": "No attachment provided — skipped.",
+                        "error": "",
+                        "duration_ms": 0,
+                        "retries": 0,
+                    }],
+                    "steps_taken": steps_taken + 1,
+                    "estimated_cost": cost,
+                    "current_step_index": idx + 1,
+                    "status": "verifying",
+                    "flow_data": merged_flow,
+                    "messages": [],
+                }
+
         result_raw = await tool.ainvoke(resolved_params)
         # Unwrap LangChain MCP content blocks so downstream code (pre-resolve,
         # flow_data storage, template resolution) always sees real JSON-serialisable data.

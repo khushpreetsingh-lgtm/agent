@@ -96,6 +96,11 @@ async def verifier_node(state: AgentState) -> dict:
 
     # ── MCP / API tools: verify result content — no blind auto-pass ─────────
     if tool_used not in _BROWSER_TOOLS:
+        # Skipped steps (e.g. jira_add_attachment with no file) — advance without error
+        if step_status == "skipped":
+            logger.info("[VERIFIER] Step '%s' skipped — advancing", step_id)
+            return {"current_step_index": idx + 1, "retry_count": 0, "status": "executing"}
+
         # 1. Explicit failure from executor (exception raised or tool returned error status)
         if step_status in ("failed", "partial"):
             error_msg = last_result.get("error", "unknown error")
