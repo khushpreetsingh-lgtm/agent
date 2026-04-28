@@ -11,7 +11,6 @@ Usage:
 import sys
 import asyncio
 import logging
-import os
 
 # ── Windows fix: Playwright needs ProactorEventLoop ──────────────────────────
 if sys.platform == "win32":
@@ -42,13 +41,6 @@ if src_path.exists():
 import uvicorn  # noqa: E402 (must be imported after policy is set)
 
 if __name__ == "__main__":
-    # When running on Netlify build servers the build command may run this
-    # file. Avoid starting the long-running uvicorn process (and avoid
-    # importing the app which triggers Playwright/MCP startup) during the
-    # build by exiting early when NETLIFY is set.
-    if os.environ.get("NETLIFY"):
-        print("Netlify build detected — skipping server start.")
-        sys.exit(0)
     uvicorn.run(
         "dqe_agent.api:app",
         host="0.0.0.0",

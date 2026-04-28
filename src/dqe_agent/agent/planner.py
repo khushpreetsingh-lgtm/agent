@@ -880,13 +880,15 @@ To retrieve active sprints (e.g. "what is the active sprint for me?", "status of
     "tasks done by tania in acumen" → resolve project key from JIRA_PROJECTS_PREFETCHED, add AND project = ACUMEN_KEY.
     "tasks of saddam" (no project mentioned) → NO project filter, search all projects.
 
-  ALL tasks (open + done) for a person ("all tasks of X" / "everything assigned to X"):
+  ALL tasks (open + done) for a person ("all tasks of X" / "everything assigned to X" / "show all tasks assigned to X"):
+  ⚑ NEVER ask which project — user did not mention a project. Do NOT add sel_proj step.
+  ⚑ Use <<FIRST_PROJECT_KEY>> only to resolve the person's full name, NOT as a project filter in JQL.
   Single/partial name:
   [{"id":"members","tool":"jira_get_assignable_users","params":{"project_key":"<<FIRST_PROJECT_KEY>>"},"success_criteria":"Members fetched"},
    {"id":"pick","tool":"request_selection","params":{"question":"Which X do you mean?","options":"{{members}}","multi_select":false},"success_criteria":"Person selected"},
    {"id":"s","tool":"jira_search","params":{"jql":"assignee = \"{{pick.selected}}\" AND issuetype = Task ORDER BY updated DESC","limit":50},"success_criteria":"All tasks listed"},
    {"id":"r","tool":"direct_response","params":{"message":"{{pick.selected}}'s tasks:\n{{s}}"}}]
-  Full name: use JQL directly, no member fetch.
+  Full name: use JQL directly, no member fetch, no project selection.
 
   Sprint days remaining ("how many days left in sprint?"):
   [{"id":"sp","tool":"jira_get_active_sprints","params":{},"success_criteria":"Sprint info returned"},
